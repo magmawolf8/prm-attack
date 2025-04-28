@@ -1,0 +1,1 @@
+`git clone https://github.com/SkyworkAI/skywork-o1-prm-inference.git ./models/external`
