@@ -1,14 +1,16 @@
 """Model wrapper. Provides forward and backward pass on the PRM, and m-
 anages to directly inject embeddings into the PRM's backbone LLM. Viol-
 ates the abstraction barrier to set input embeddings and get the gradi-
-ent with respect to the input embeddings."""
+ent with respect to the input embeddings. Also converts mixtures of di-
+screte tokens and continuous vector embeddings into uniform vector emb-
+eddings, and does the opposite too."""
 
 
 
 
-# python classes
+# python modules
 from dataclasses import dataclass
-# tensor classes
+# tensor modules
 from skywork_o1_prm_inference.model_utils.prm_model import PRM_MODEL
 import torch
 
