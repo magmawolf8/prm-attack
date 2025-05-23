@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: prm-attack
+Version: 0.1.0
+Summary: Hee hee hee haw
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: datasets
+Requires-Dist: torch
+Provides-Extra: test
+Requires-Dist: pytest>=7.0; extra == "test"
+Dynamic: license-file
+
+`git clone https://github.com/SkyworkAI/skywork-o1-prm-inference.git ./src/models/skywork_o1_prm_inference`
