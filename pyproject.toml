@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=75.8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prm-attack"
+version = "0.1.0"
+description = "Placeholder"
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+    "datasets",
+    "torch"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0"
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests"
+]
+norecursedirs = [
+    ".*"
+]

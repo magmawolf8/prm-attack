@@ -1,0 +1,5 @@
+datasets
+torch
+
+[test]
+pytest>=7.0
