@@ -4,9 +4,9 @@
 
 
 # configuration
-from prm_attack.config import
+# from prm_attack.config import 
 # skywork modules
-from prm_attack.models.clearskywork import ClearSkywork
+from prm_attack.models.clear_skywork import ClearSkywork
 
 
 
