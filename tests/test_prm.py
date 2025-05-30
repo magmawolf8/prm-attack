@@ -1,7 +1,5 @@
 # configuration
-from prm_attack.config import SKYWORK_MODEL_NAME, DEVICE
-# skywork modules
-from prm_attack.models.clearskywork import ClearSkywork
+from prm_attack.config import DEVICE
 # testing modules
 import pytest
 # tensor modules
@@ -10,12 +8,6 @@ import torch.nn as nn
 
 
 
-
-@pytest.fixture(scope="session")
-def prm():
-    net = ClearSkywork.from_pretrained(SKYWORK_MODEL_NAME)
-    net = net.to(DEVICE).eval()
-    return net
 
 def test_prm_initialization(prm):
     assert isinstance(prm, nn.Module)
