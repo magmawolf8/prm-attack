@@ -19,6 +19,7 @@ from prm_attack.config import (
 from prm_attack.config import Attack
 from prm_attack.models.skywork_tokenizer import SkyworkTokenizerAPI
 from prm_attack.models.clear_skywork import ClearSkywork
+from prm_attack.attacks.model_server import ModelServer
 from prm_attack.analysis.data_collector import DataCollector
 from datasets import load_dataset
 
@@ -47,7 +48,7 @@ def render_revision_history(steps_orig, revision_history: list[Attack]):
         lines.append(
             f"- **Previous Question:** {r.modification}"
             f"- **Language Model Answer:** {steps_orig}"
-            f"- **Score:** {float(r.mod_reward.split()[-1][:-1])}"
+            f"- **Score:** {float(r.mod_reward.split()[-1].replace('[', '', -1).replace(']', '', -1))}"
         )
     return "\n".join(lines)
 
@@ -60,6 +61,7 @@ def build_attacker_prompt(q_orig: str, steps_orig, revision_history):
 
 def extract_json_object(text):
     text = re.sub(r'(?<!\\)\\(?![\\/"bfnrtu])', r'\\\\', text)
+    text = re.sub(r',\s*([}\]])', r'\1', text)
 
     l, r = text.find('{'), text.rfind('}')
     if l != -1 and r != -1 and r > l:
@@ -87,16 +89,10 @@ def generate_attack(client, prompt):
     return None
 
 @torch.no_grad()
-def worker_eval_gpu(rank, attacker_model_address, dataset, indices, q):
+def worker_eval_gpu(rank, prm_server, attacker_model_address, dataset, indices, q):
     tokenizer = SkyworkTokenizerAPI(SKYWORK_MODEL_NAME, DEFAULT_STEP_TOKEN)
 
     client = OpenAI(base_url=attacker_model_address, api_key="EMPTY")
-
-    torch.cuda.set_device(rank)
-    device = torch.device("cuda")
-
-    model = ClearSkywork.from_pretrained(SKYWORK_MODEL_NAME).to(device).eval()
-    model.eval()
 
     loader = DataLoader(Subset(dataset, indices), shuffle=False)
 
@@ -118,11 +114,24 @@ def worker_eval_gpu(rank, attacker_model_address, dataset, indices, q):
             attacker_prompt = build_attacker_prompt(problem, steps, revision_history)
             mod = generate_attack(client, attacker_prompt)
             if mod is None:
-                raise ValueError("Attack failed. What should I do?")
+                # add failed Attack to revision_history but not to the data collector
+                # decrement i (retry)
+                revision_history.append(
+                    Attack(
+                        original_id=id, 
+                        mod_idx=-1, 
+                        mod_len=1, 
+                        modification="<Failed to parse json>", 
+                        mod_reward="[0.0]", 
+                        description=f"catattack iteration {i}"
+                    )
+                )
+                i -= 1
 
-            inputs = tokenizer.prepare_steps(mod, steps).to(device)
+            inputs = tokenizer.prepare_steps(mod, steps)
 
-            forward = model(**inputs, return_prob=True)
+            future = prm_server.submit(inputs)
+            forward = future.result()
 
             step_rewards = forward.rewards[inputs.data["reward_flags"].bool()]
 
@@ -136,6 +145,7 @@ def worker_eval_gpu(rank, attacker_model_address, dataset, indices, q):
                     description=f"catattack iteration {i}"
                 )
             )
+
             q.put(revision_history[-1])
 
 def parallel_eval_gpu(commit_hash):
@@ -153,11 +163,17 @@ def parallel_eval_gpu(commit_hash):
     dc = DataCollector("attacks.db", q, commit_hash)
     dc.start()
 
+    torch.cuda.set_device(WORLD_SIZE + 1)
+    device = torch.device("cuda")
+    model = ClearSkywork.from_pretrained(SKYWORK_MODEL_NAME).to(device).eval()
+    prm_server = ModelServer(model, device)
+    prm_server.start()
+
     procs = list()
     for rank, shard, addr in zip(range(len(shards)), shards, attacker_model_addresses):
         p = ctx.Process(
             target=worker_eval_gpu,
-            args=(rank, addr, gsm8k, shard, q)
+            args=(rank, prm_server, addr, gsm8k, shard, q)
         )
         p.start()
         procs.append(p)
@@ -165,7 +181,11 @@ def parallel_eval_gpu(commit_hash):
     for p in procs:
         p.join()
 
+    prm_server.stop()
+    prm_server.join()
+
     dc.stop()
+    dc.join()
 
 
 
