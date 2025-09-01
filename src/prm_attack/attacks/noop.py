@@ -86,6 +86,7 @@ def parallel_eval_gpu(commit_hash):
         p.join()
 
     dc.stop()
+    dc.join()
 
 
 
