@@ -40,7 +40,7 @@ from tqdm import tqdm
 
 random.seed(RANDOM_SEED)
 
-def render_revision_history(steps_orig, revision_history: list[Attack]):
+def render_revision_history(revision_history: list[Attack]):
     if not revision_history:
         return "- (no previous attempts)"
     lines = list()
