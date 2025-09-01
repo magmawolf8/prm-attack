@@ -65,7 +65,7 @@ def extract_json_object(text):
     l, r = text.find('{'), text.rfind('}')
     if l != -1 and r != -1 and r > l:
         return json.loads(text[l:r+1])
-    raise json.JSONDecodeError("Could not find opening and closing braces.", pos=0)
+    raise json.JSONDecodeError(doc="Could not find opening and closing braces.", pos=0)
 
 def generate_attack(client, prompt):
     response = client.chat.completions.create(
