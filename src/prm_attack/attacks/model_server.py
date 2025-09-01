@@ -12,6 +12,8 @@ class ModelServer(threading.Thread):
         self.model = model
         self.device = device
         self.q = q
+
+        self.stop_flag = threading.Event()
     
     def submit(self, inputs):
         future = Future()
