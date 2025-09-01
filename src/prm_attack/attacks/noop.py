@@ -39,8 +39,10 @@ def worker_eval_gpu(rank, dataset, indices, q):
         id = entry["id"]
         problem = entry["problem"]
         steps = entry["steps"]
-        # weird processing step I need to do to turn steps from list[tuple[str]] into list[str]
+        # weird processing step I need to do to normalize problems, and steps from list[tuple[str]] into list[str]
+        problem = problem[0]
         steps = [step[0] for step in steps]
+        print(problem)
 
         inputs = tokenizer.prepare_steps(problem, steps).to(device)
 
