@@ -40,6 +40,7 @@ def worker_eval_gpu(rank, dataset, indices, q):
         problem = entry["problem"]
         steps = entry["steps"]
         # weird processing step I need to do to normalize problems, and steps from list[tuple[str]] into list[str]
+        id = id[0]
         problem = problem[0]
         steps = [step[0] for step in steps]
 

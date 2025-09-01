@@ -105,6 +105,7 @@ def worker_eval_gpu(rank, attacker_model_address, dataset, indices, q):
         id = entry["id"]
         problem = entry["problem"]
         steps = entry["steps"]
+        id = id[0]
         problem = problem[0]
         steps = [step[0] for step in steps]
 
