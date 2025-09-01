@@ -152,7 +152,7 @@ def parallel_eval_gpu(commit_hash):
     dc.start()
 
     procs = list()
-    for rank, shard, addr in (*enumerate(shards), attacker_model_addresses):
+    for rank, shard, addr in zip(range(len(shards)), shards, attacker_model_addresses):
         p = ctx.Process(
             target=worker_eval_gpu,
             args=(rank, addr, gsm8k, shard, q)
