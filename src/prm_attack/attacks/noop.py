@@ -56,7 +56,7 @@ def worker_eval_gpu(rank, dataset, indices, q):
                 mod_idx=-1, 
                 mod_len=1, 
                 modification=problem, 
-                mod_reward=step_rewards.tolist(), 
+                mod_reward=repr(step_rewards.tolist()), 
                 description=f"noop"
             )
         )
