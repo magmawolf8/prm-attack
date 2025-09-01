@@ -4,7 +4,7 @@ hostname --ip-address
 MODEL="meta-llama/Llama-3.1-8B-Instruct"
 MODEL_NAME="Llama-3.1-8B-Instruct"
 
-export CUDA_VISIBLE_DEVICES=6
+export CUDA_VISIBLE_DEVICES=3
 python -m vllm.entrypoints.openai.api_server \
         --model $MODEL \
         --served-model-name $MODEL_NAME \

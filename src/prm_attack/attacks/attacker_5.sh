@@ -4,12 +4,12 @@ hostname --ip-address
 MODEL="meta-llama/Llama-3.1-8B-Instruct"
 MODEL_NAME="Llama-3.1-8B-Instruct"
 
-export CUDA_VISIBLE_DEVICES=4
+export CUDA_VISIBLE_DEVICES=6
 python -m vllm.entrypoints.openai.api_server \
         --model $MODEL \
         --served-model-name $MODEL_NAME \
         --tensor-parallel-size 1 \
-        --port 12343 \
+        --port 12345 \
         --host 0.0.0.0 \
         --trust-remote-code \
         --max-model-len 8192 \

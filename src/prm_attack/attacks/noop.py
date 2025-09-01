@@ -30,7 +30,6 @@ def worker_eval_gpu(rank, dataset, indices, q):
     device = torch.device("cuda")
 
     model = ClearSkywork.from_pretrained(SKYWORK_MODEL_NAME).to(device).eval()
-    model.eval()
 
     loader = DataLoader(Subset(dataset, indices), shuffle=False)
 
