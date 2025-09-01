@@ -33,6 +33,7 @@ import math
 import argparse
 import re
 import json
+from tqdm import tqdm
 
 
 
@@ -96,6 +97,9 @@ def worker_eval_gpu(rank, attacker_model_address, dataset, indices, q):
     model.eval()
 
     loader = DataLoader(Subset(dataset, indices), shuffle=False)
+
+    if rank == 0:
+        loader = tqdm(loader)
 
     for entry in loader:
         id = entry["id"]
