@@ -29,8 +29,6 @@ from torch.utils.data import DataLoader, Subset
 
 from openai import OpenAI
 
-from concurrent.futures import Future
-import queue
 import random
 import math
 import argparse
@@ -91,7 +89,7 @@ def generate_attack(client, prompt):
     return None
 
 @torch.no_grad()
-def worker_eval_gpu(rank, prm_q, attacker_model_address, dataset, indices, q):
+def worker_eval_gpu(rank, prm_q, response_q, attacker_model_address, dataset, indices, q):
     tokenizer = SkyworkTokenizerAPI(SKYWORK_MODEL_NAME, DEFAULT_STEP_TOKEN)
 
     client = OpenAI(base_url=attacker_model_address, api_key="EMPTY")
@@ -134,11 +132,8 @@ def worker_eval_gpu(rank, prm_q, attacker_model_address, dataset, indices, q):
 
             inputs = tokenizer.prepare_steps(mod, steps)
 
-            future = Future()
-            prm_q.put((inputs, future))
-            forward = future.result()
-
-            step_rewards = forward.rewards[inputs.data["reward_flags"].bool()]
+            prm_q.put((rank, inputs))
+            step_rewards = response_q.get()
 
             revision_history.append(
                 Attack(
@@ -146,7 +141,7 @@ def worker_eval_gpu(rank, prm_q, attacker_model_address, dataset, indices, q):
                     mod_idx=-1, 
                     mod_len=1, 
                     modification=mod, 
-                    mod_reward=repr(step_rewards.tolist()), 
+                    mod_reward=repr(step_rewards), 
                     description=f"catattack iteration {i}"
                 )
             )
@@ -173,14 +168,15 @@ def parallel_eval_gpu(commit_hash):
     device = torch.device("cuda")
     model = ClearSkywork.from_pretrained(SKYWORK_MODEL_NAME).to(device).eval()
     prm_q = ctx.Queue()
-    prm_server = ModelServer(model, device, prm_q)
+    response_qs = [ctx.Queue() for _ in range(WORLD_SIZE)]
+    prm_server = ModelServer(model, device, prm_q, response_qs)
     prm_server.start()
 
     procs = list()
     for rank, shard, addr in zip(range(len(shards)), shards, attacker_model_addresses):
         p = ctx.Process(
             target=worker_eval_gpu,
-            args=(rank, prm_q, addr, gsm8k, shard, q)
+            args=(rank, prm_q, response_qs[rank], addr, gsm8k, shard, q)
         )
         p.start()
         procs.append(p)
