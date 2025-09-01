@@ -142,7 +142,6 @@ def parallel_eval_gpu(commit_hash):
     ]
 
     gsm8k = load_dataset("Qwen/ProcessBench", split="gsm8k")
-    assert len(gsm8k) < DATA_SUBSET_LEN, "Required subset length is too large"
     all_indices = random.sample(list(range(len(gsm8k))), DATA_SUBSET_LEN)
     shard_size = math.ceil(DATA_SUBSET_LEN)
     shards = [all_indices[i:i+shard_size] for i in range(0, DATA_SUBSET_LEN, shard_size)]
