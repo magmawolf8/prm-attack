@@ -63,6 +63,7 @@ print(repr(skywork_tokenizer_api._tokenizer.decode(tokens)))
 logits = prefix @ embedding_layer.T
 tokens = torch.argmax(logits, dim=1)
 similar = embedding_layer[tokens]
+print(tokens)
 print(repr(skywork_tokenizer_api._tokenizer.decode(tokens)))
 
 
@@ -98,7 +99,7 @@ def test():
         inputs = skywork_tokenizer_api.prepare_steps(questions, answers)
 
         inputs_embeds = embedding_layer[inputs.data["input_ids"]]
-        inputs_embeds, attn_mask, answer_flag, reward_flags = insertPrefix(inputs, inputs_embeds, prefix)
+        inputs_embeds, attn_mask, answer_flag, reward_flags = insertPrefix(inputs, inputs_embeds, similar)
 
         inputs = inputs.to(DEVICE)
 
@@ -110,7 +111,7 @@ def test():
         sum_unedited += masked_unedited.mean()
         sum_modified += masked_modified.mean()
 
-    print(f"Reward without prefix: {sum_unedited/(i+1):.6f} Reward with prefix: {sum_modified/(i+1):.6f}")
+    print(f"Reward without prefix: {sum_unedited/(i+1):.6f} Reward with similar token to prefix: {sum_modified/(i+1):.6f}")
 
 if __name__ == "__main__":
     test()

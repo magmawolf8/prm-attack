@@ -3,10 +3,10 @@ from prm_attack.config import SKYWORK_MODEL_NAME, DEFAULT_STEP_TOKEN
 # python modules
 import random
 import time
-import pickle
+import math
 # tensor modules
 import torch
-from torch.nn import functional as F
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader, DistributedSampler
 import torch.multiprocessing as mp
@@ -47,22 +47,17 @@ class PRM800k(Dataset):
 
 NUM_EPOCHS = 3
 BATCH_SIZE = 2
-NUM_VECS = 5
+NUM_VECS = 7
 LEARNING_RATE = 1e-2
-seed = 420
+SEED = 420
 DATASET_SIZE = 2000
-# TODO add validation "loss" (average reward on test dataset)
-# TODO should we do the log of the success probability?
-# TODO pickle the starting random vector
-# TODO pickle is broken
 
-# need to linearly increase from 0 to 10
-# OR, scale L1 loss proportionately to primary loss?
+torch.manual_seed(SEED)
+random.seed(SEED)
+torch.cuda.manual_seed_all(SEED)
 
-torch.manual_seed(seed)
-random.seed(seed)
-torch.cuda.manual_seed_all(seed)
 
+# TODO 
 
 
 
@@ -87,6 +82,18 @@ def insertPrefix(inputs, inputs_embeds, prefix):
 
 
 
+
+def gumbel_softmax(logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    # sample from Gumbel distribution
+    #gumbel_noise = -torch.empty_like(logits).exponential_().log()
+    # gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits) + 1e-20))
+
+    # add Gumbel noise to logits
+    # gumbel_logits = (logits + gumbel_noise) / temperature
+
+    # apply softmax
+    #return F.softmax(gumbel_logits, dim=-1)
+    return F.softmax(logits / temperature, dim=-1)
 
 def collate_fn(batch):
     questions, answers = zip(*batch)
@@ -119,10 +126,24 @@ def train(rank, world_size):
     net = net.to(rank).eval()
 
     embedding_layer = net.pretrained_model.model.embed_tokens.weight
-    embeds_len = embedding_layer.shape[1]
-    prefix = torch.nn.Parameter(torch.normal(0, (2/embeds_len)**0.5, (NUM_VECS, embeds_len), requires_grad=True, device=rank))
-    optimizer = torch.optim.SGD([prefix], lr=LEARNING_RATE, maximize=False)
+    vocab_size = embedding_layer.shape[0]
+    #logits = torch.nn.Parameter(torch.normal(0, (2/vocab_size)**0.5, (NUM_VECS, vocab_size), requires_grad=True, device=rank))
+    logits = torch.nn.Parameter(torch.empty(NUM_VECS, vocab_size, device=rank))
+    torch.nn.init.xavier_uniform_(logits)
+    #optimizer = torch.optim.SGD([logits], lr=LEARNING_RATE, maximize=False)
+    optimizer = torch.optim.Adam([logits], lr=LEARNING_RATE)
 
+    start_temp = 1
+    end_temp = 0.01
+
+    steps = NUM_EPOCHS * DATASET_SIZE / BATCH_SIZE / world_size
+
+    alpha = math.exp((math.log(end_temp) - math.log(start_temp))/steps)
+
+    ema_loss = None
+    ema_beta = 0.98
+
+    i = 0
     if rank == 0:
         print("Training start")
 
@@ -132,46 +153,52 @@ def train(rank, world_size):
         sampler.set_epoch(epoch)
         for batch in loader:
 
+            probs = gumbel_softmax(logits, start_temp * pow(alpha, i))
+            prefix = probs @ embedding_layer
+            
+            # prepare steps of the batch; tokenize etc.
             questions, answers = batch
-
             inputs = skywork_tokenizer_api.prepare_steps(questions, answers)
 
+            # insert the continuous prefix
             inputs_embeds = embedding_layer[inputs.data["input_ids"]]
             inputs_embeds, attn_mask, answer_flag, reward_flags = insertPrefix(inputs, inputs_embeds, prefix)
-            
-            loss = 0
-            softmax_weights = torch.softmax(prefix @ embedding_layer.T / torch.outer(torch.norm(prefix, dim=-1), torch.norm(embedding_layer, dim=-1)), dim=-1)
-            
-            # L1 loss currently doesn't work. Pivoting to the next option: cross-entropy loss between this and the one-hot vector for the maximum.
-            #loss = -torch.sum(torch.log(softmax_weights) * softmax_weights)/NUM_VECS
-            tokens = torch.argmax(softmax_weights, dim=-1)
-            loss = 0
-            for i, k in enumerate(tokens):
-                loss -= torch.log(softmax_weights[i,k])
-            
             inputs.data["attention_mask"] = attn_mask
             inputs.data["answer_flag"] = answer_flag
             inputs.data["reward_flags"] = reward_flags
             inputs = inputs.to(rank)
 
+            # run the model
             forward_output = net(**inputs, inputs_embeds=inputs_embeds, return_prob=True)
 
-            masked_gain_loss = -torch.log(forward_output.rewards[inputs.data["reward_flags"].bool()])
-            masked_gain_loss = masked_gain_loss.mean()
+            # calculate the cost (want to maximize reward adversarially)
+            masked_cost_fn = -torch.log(forward_output.rewards[inputs.data["reward_flags"].bool()])
+            masked_cost_fn = masked_cost_fn.mean()
 
-            final_loss = loss + masked_gain_loss
+            # calculate the parallelized gradient
+            masked_cost_fn.backward()
+            dist.all_reduce(logits.grad, op=dist.ReduceOp.SUM)
+            logits.grad /= world_size
 
-            final_loss.backward()
-
-            dist.all_reduce(prefix.grad, op=dist.ReduceOp.SUM)
-            prefix.grad /= world_size
-
+            # step the optimizer
             optimizer.step()
             optimizer.zero_grad()
 
+            #calculate diagnostic stuff
+            if ema_loss is None:
+                ema_loss = masked_cost_fn.item()
+            else:
+                ema_loss = ema_beta * ema_loss + (1 - ema_beta) * masked_cost_fn.item()
+
+            i += 1
+
             if rank == 0:
+                tokens = torch.argmax(probs, dim=-1)
+                if rank == 0 and i % 5 == 0:
+                    print(f"[Step {i}] logits mean: {logits.data.mean():.4f}, std: {logits.data.std():.4f}, max: {logits.data.max():.4f}")
                 pbar.update(BATCH_SIZE * world_size)
-                pbar.set_postfix(loss=f"{masked_gain_loss.item():.4f}", L1=f"{loss.item():.4f}", prefix=repr(skywork_tokenizer_api._tokenizer.decode(tokens)))
+                #pbar.set_postfix(cost=f"{masked_cost_fn.item():.4f}", temp=f"{start_temp * pow(alpha, i):.4f}", prefix=repr(skywork_tokenizer_api._tokenizer.decode(tokens)), value=f"{torch.max(probs, dim=-1)}")
+                pbar.set_postfix(EMA_loss=f"{ema_loss:.4f}", max_prob=f"{torch.max(probs, dim=-1).values.tolist()}")
 
     torch.save(prefix, f"prefix_epochs{NUM_EPOCHS}_batch{BATCH_SIZE}_nvecs{NUM_VECS}_lr{LEARNING_RATE}_size{DATASET_SIZE}.pt")
 
@@ -183,11 +210,6 @@ def train(rank, world_size):
 def main():
     world_size = torch.cuda.device_count()
     mp.spawn(train, args=(world_size,), nprocs=world_size, join=True)
-    # use cross-entropy, but positive instead of negative
-# need to make object which experiments with the output of the tokenizer
-# maybe I subclass the skywork tokenizer API.
-# then another object does backpropagation after getting ForwardOutput.
-# actually we probably don't need a separate object, instead directly implement it in attack/
 
 if __name__ == "__main__":
     main()

@@ -47,9 +47,9 @@ class PRM800k(Dataset):
 
 NUM_EPOCHS = 3
 BATCH_SIZE = 2
-NUM_VECS = 5
+NUM_VECS = 3
 LEARNING_RATE = 1e-2
-seed = 420
+seed = 4200
 DATASET_SIZE = 2000
 # TODO add validation "loss" (average reward on test dataset)
 # TODO should we do the log of the success probability?
@@ -79,8 +79,8 @@ def insertPrefix(inputs, inputs_embeds, prefix):
         batch_inputs_embeds.append(torch.vstack((embed[:index], prefix, embed[index:])))
 
     prefixed_inputs_embeds = torch.stack(batch_inputs_embeds)
-    prefixed_attention_mask = torch.nn.functional.pad(input=inputs.data["attention_mask"], pad=(prefix_len, 0), value=1)
-    prefixed_answer_flag = torch.nn.functional.pad(input=inputs.data["answer_flag"], pad=(0, prefix_len))
+    prefixed_attention_mask = torch.nn.functional.pad(input=inputs.data["attention_mask"], pad=(prefix_len, 0))
+    prefixed_answer_flag = torch.nn.functional.pad(input=inputs.data["answer_flag"], pad=(prefix_len, 0))
     prefixed_reward_flags = torch.nn.functional.pad(input=inputs.data["reward_flags"], pad=(prefix_len, 0))
 
     return prefixed_inputs_embeds, prefixed_attention_mask, prefixed_answer_flag, prefixed_reward_flags
@@ -103,7 +103,7 @@ def train(rank, world_size):
 
     train_prm800k = PRM800k("phase2_train.jsonl", DATASET_SIZE)
     sampler = DistributedSampler(train_prm800k, num_replicas=world_size, rank=rank, shuffle=True)
-    loader = DataLoader(train_prm800k, batch_size=BATCH_SIZE, sampler=sampler, shuffle=False, num_workers=4, persistent_workers=True, collate_fn=collate_fn)
+    loader = DataLoader(train_prm800k, batch_size=BATCH_SIZE, sampler=sampler, shuffle=False, num_workers=4, collate_fn=collate_fn, persistent_workers=True)
 
     if rank == 0:
         print("Loading dataset workers...")
@@ -116,7 +116,7 @@ def train(rank, world_size):
     net = ClearSkywork.from_pretrained(SKYWORK_MODEL_NAME)
     for param in net.parameters():
         param.requires_grad = False
-    net = net.to(rank).eval()
+    net = net.to(rank).train()
 
     embedding_layer = net.pretrained_model.model.embed_tokens.weight
     embeds_len = embedding_layer.shape[1]
@@ -139,16 +139,24 @@ def train(rank, world_size):
             inputs_embeds = embedding_layer[inputs.data["input_ids"]]
             inputs_embeds, attn_mask, answer_flag, reward_flags = insertPrefix(inputs, inputs_embeds, prefix)
             
-            loss = 0
-            softmax_weights = torch.softmax(prefix @ embedding_layer.T / torch.outer(torch.norm(prefix, dim=-1), torch.norm(embedding_layer, dim=-1)), dim=-1)
-            
-            # L1 loss currently doesn't work. Pivoting to the next option: cross-entropy loss between this and the one-hot vector for the maximum.
-            #loss = -torch.sum(torch.log(softmax_weights) * softmax_weights)/NUM_VECS
-            tokens = torch.argmax(softmax_weights, dim=-1)
-            loss = 0
-            for i, k in enumerate(tokens):
-                loss -= torch.log(softmax_weights[i,k])
-            
+            #loss = 0
+            weights = F.softmax(prefix @ embedding_layer.T, dim=-1)
+            # prefix shape: (num_vectors, hidden_size)
+            # prefix unsqueeze 1: (num_vectors, 1, hidden_size)
+            # embedding unsqueeze 0: (1, vocab_size, hidden_size)
+            # dists: (num_vectors, vocab_size)
+            # Compute all pairwise distances between prefix vectors and embedding layer at once
+            #dists = torch.norm(prefix.unsqueeze(1) - embedding_layer.unsqueeze(0), dim=-1)  # [NUM_VECS, vocab_size]
+            # make sure this is L1 loss and not L2
+            #loss = torch.mean(torch.sum(weights * dists, dim=-1))
+            #loss = torch.mean(torch.mean(dists, dim=-1))
+            #loss = -torch.sum(torch.max(similarities, dim=-1).values)
+
+            # decode to English again to observe vectors
+            # logits = inputs_embeds[0] @ embedding_layer.T
+            # tokens = torch.argmax(logits, dim=1)
+            # skywork_tokenizer_api._tokenizer.decode(tokens))
+
             inputs.data["attention_mask"] = attn_mask
             inputs.data["answer_flag"] = answer_flag
             inputs.data["reward_flags"] = reward_flags
@@ -159,7 +167,8 @@ def train(rank, world_size):
             masked_gain_loss = -torch.log(forward_output.rewards[inputs.data["reward_flags"].bool()])
             masked_gain_loss = masked_gain_loss.mean()
 
-            final_loss = loss + masked_gain_loss
+            #final_loss = loss + masked_gain_loss
+            final_loss = masked_gain_loss
 
             final_loss.backward()
 
@@ -171,7 +180,8 @@ def train(rank, world_size):
 
             if rank == 0:
                 pbar.update(BATCH_SIZE * world_size)
-                pbar.set_postfix(loss=f"{masked_gain_loss.item():.4f}", L1=f"{loss.item():.4f}", prefix=repr(skywork_tokenizer_api._tokenizer.decode(tokens)))
+                tokens = torch.argmax(weights, dim=-1)
+                pbar.set_postfix(loss=f"{masked_gain_loss.item():.4f}", prefix=repr(skywork_tokenizer_api._tokenizer.decode(tokens)))
 
     torch.save(prefix, f"prefix_epochs{NUM_EPOCHS}_batch{BATCH_SIZE}_nvecs{NUM_VECS}_lr{LEARNING_RATE}_size{DATASET_SIZE}.pt")
 

@@ -27,3 +27,26 @@ Next steps:
     2. Prefix randomly-initialized vectors at the start of the answer trajectory, and optimize those.
     3. Create new dataset, adversarially modified to make binary classification as bad as posssible.
 4. Need more visualizations in visualization.py (currently empty)
+
+
+I need a more sustainable set of functions for buildiing my research code. In particular, the first variant of experiment (iteration on every question-answer pair) has already been achieved but not the second one. To modify the second one, the optimization should be able to be applied to either one or multiple.
+
+
+Variant 1 of experiment 2:
+1. Load a question-answer pair
+2. Get the reward for the default trajectory. This part is relatively simple...
+3. Start iteration for the particular problem. Build the attacker prompt, then generate an attack (by prompting the attacker model)
+4. Output a postfix only (add this configuration in build_attacker_prompt, and another one for optimizing multiple prompts at one time...)
+    a. Or output a completely changed step 1/question
+5. Evaluate the question-answer pair on the PRM
+6. Finish evaluating and record data.
+
+Debug variant 1 of experiment 2:
+1. Design a visualization: % change in reward as a function of iterations. Just save all the data and make a visualization later.
+2. Parallelize the evaluation: try to figure out how to evaluate as quickly as possible
+3. Change from prm800k to processbench
+4. Try both (postfix only) and (free to change step however)
+5. Refactor the code
+
+
+Once the optimal prompt is determined, we can continue to use it. Especially for batches

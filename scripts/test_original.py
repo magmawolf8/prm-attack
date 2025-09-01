@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 
 
-seed = 4200
+seed = 420
 torch.manual_seed(seed)
 torch.cuda.manual_seed_all(seed)
 
@@ -49,7 +49,7 @@ net = ClearSkywork.from_pretrained(SKYWORK_MODEL_NAME)
 net = net.to(DEVICE).eval()
 embedding_layer = net.pretrained_model.model.embed_tokens.weight
 
-prefix = torch.load("prefix_epochs3_batch2_nvecs7_lr0.01_size2000.pt", weights_only=True).to(DEVICE)
+prefix = torch.load("prefix_epochs3_batch1_nvecs3_lr0.001_size2000.pt", weights_only=True).to(DEVICE)
 embeds_len = embedding_layer.shape[1]
 NUM_VECS = 5
 original = torch.normal(0, (2/embeds_len)**0.5, (NUM_VECS, embeds_len), requires_grad=True, device=DEVICE)
@@ -86,7 +86,7 @@ def insertPrefix(inputs, inputs_embeds, prefix):
     return prefixed_inputs_embeds, prefixed_attention_mask, prefixed_answer_flag, prefixed_reward_flags
 
 def test():
-    test_prm800k = PRM800k("phase2_test.jsonl", 500)
+    test_prm800k = PRM800k("phase2_train.jsonl", 500)
     loader = DataLoader(test_prm800k, batch_size=1, shuffle=True, num_workers=4, collate_fn=collate_fn)
 
     sum_unedited = 0
@@ -98,7 +98,7 @@ def test():
         inputs = skywork_tokenizer_api.prepare_steps(questions, answers)
 
         inputs_embeds = embedding_layer[inputs.data["input_ids"]]
-        inputs_embeds, attn_mask, answer_flag, reward_flags = insertPrefix(inputs, inputs_embeds, prefix)
+        inputs_embeds, attn_mask, answer_flag, reward_flags = insertPrefix(inputs, inputs_embeds, original)
 
         inputs = inputs.to(DEVICE)
 
@@ -110,7 +110,7 @@ def test():
         sum_unedited += masked_unedited.mean()
         sum_modified += masked_modified.mean()
 
-    print(f"Reward without prefix: {sum_unedited/(i+1):.6f} Reward with prefix: {sum_modified/(i+1):.6f}")
+    print(f"Reward without prefix: {sum_unedited/(i+1):.6f} Reward with similar token to prefix: {sum_modified/(i+1):.6f}")
 
 if __name__ == "__main__":
     test()

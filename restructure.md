@@ -27,7 +27,7 @@ skywork_prm/                ← installable package  (pip -e .)
 ├── attacks/                ← If the program shouldn't have an entrypoint, then don't add a main(). Here, embedding_search.py shouldn't have a main() since it is a class implementing something specific, while gradient_attack.py should have a main() since it might be used as entrypoint. Consider using argparse for gradient_attack.py's main()?
 │   ├── __init__.py
 │   ├── embedding_search.py ← *context-free* adversarial optimisation
-│   └── gradient_attack.py  ← in-context gradient descent on answers
+│   └── gradient_attack.py  ← in-context gradient descent on answers. Give it the things you want and you can 
 │
 └── tests/                  ← pytest unit tests
     └── …
