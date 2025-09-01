@@ -64,12 +64,8 @@ def extract_json_object(text):
 
     l, r = text.find('{'), text.rfind('}')
     if l != -1 and r != -1 and r > l:
-        try:
-            return json.loads(text[l:r+1])
-        except Exception as e:
-            print(f"could not extract json: {e}\n{text}")
-            return None
-    return None
+        return json.loads(text[l:r+1])
+    raise json.JSONDecodeError("Could not find opening and closing braces.")
 
 def generate_attack(client, prompt):
     response = client.chat.completions.create(
@@ -79,14 +75,12 @@ def generate_attack(client, prompt):
     
     content = (response.choices[0].message.content or "")
     js = extract_json_object(content)
-    if not js:
-        return None
     
     key = "final question"
     if key in js and isinstance(js[key], str):
         return js[key]
     
-    return None
+    raise KeyError('Could not find key "final question"')
 
 @torch.no_grad()
 def worker_eval_gpu(rank, prm_q, response_q, attacker_model_address, dataset, indices, q):
@@ -128,6 +122,22 @@ def worker_eval_gpu(rank, prm_q, response_q, attacker_model_address, dataset, in
                         mod_idx=-1, 
                         mod_len=1, 
                         modification=f"<Failed to parse json: {e}>", 
+                        mod_reward="[0.0]", 
+                        description=f"catattack iteration {i}"
+                    )
+                )
+                i -= 1
+                continue
+            except KeyError as e:
+                # add failed Attack to revision_history but not to the data collector
+                # decrement i (retry)
+                print(e)
+                revision_history.append(
+                    Attack(
+                        original_id=id, 
+                        mod_idx=-1, 
+                        mod_len=1, 
+                        modification=f"<{e}>", 
                         mod_reward="[0.0]", 
                         description=f"catattack iteration {i}"
                     )
