@@ -23,7 +23,7 @@ class ModelServer(threading.Thread):
 
             inputs.to(self.device)
             forward = self.model(**inputs, return_prob=True)
-            self.response_qs[rank].put((forward.rewards.cpu()[inputs.data["reward_flags"].bool()]).tolist())
+            self.response_qs[rank].put((forward.rewards[inputs.data["reward_flags"].bool()]).tolist())
 
     def stop(self):
         self.stop_flag.set()
