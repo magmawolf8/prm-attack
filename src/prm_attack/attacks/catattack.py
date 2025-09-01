@@ -73,14 +73,10 @@ def extract_json_object(text):
     return None
 
 def generate_attack(client, prompt):
-    try:
-        response = client.chat.completions.create(
-            model=ATTACKER_MODEL_NAME,
-            messages=[{"role": "user", "content": prompt}]
-        )
-    except BadRequestError:
-        print("modification too long")
-        return "<modification too long>"
+    response = client.chat.completions.create(
+        model=ATTACKER_MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}]
+    )
     
     content = (response.choices[0].message.content or "")
     js = extract_json_object(content)
@@ -118,20 +114,10 @@ def worker_eval_gpu(rank, prm_q, response_q, attacker_model_address, dataset, in
         i = 0
         while i < MAX_ITERATIONS:
             attacker_prompt = build_attacker_prompt(problem, steps, revision_history)
-            mod = generate_attack(client, attacker_prompt)
-            if mod == "<modification too long>":
-                revision_history.append(
-                    Attack(
-                        original_id=id, 
-                        mod_idx=-1, 
-                        mod_len=1, 
-                        modification=mod, 
-                        mod_reward="[0.0]", 
-                        description=f"catattack iteration {i}"
-                    )
-                )
-                i -= 1
-                continue 
+            try:
+                mod = generate_attack(client, attacker_prompt)
+            except BadRequestError:
+                break
             if mod is None:
                 # add failed Attack to revision_history but not to the data collector
                 # decrement i (retry)
