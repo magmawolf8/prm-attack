@@ -3,7 +3,7 @@
 
 
 from prm_attack.config import (
-    SKYWORK_MODEL_NAME, DEFAULT_STEP_TOKEN
+    SKYWORK_MODEL_NAME, DEFAULT_STEP_TOKEN, WORLD_SIZE
 )
 from prm_attack.config import Attack
 from prm_attack.models.skywork_tokenizer import SkyworkTokenizerAPI
@@ -26,7 +26,9 @@ from tqdm import tqdm
 def worker_eval_gpu(rank, dataset, indices, q):
     tokenizer = SkyworkTokenizerAPI(SKYWORK_MODEL_NAME, DEFAULT_STEP_TOKEN)
 
-    device = torch.device(f"cuda:{rank}")
+    torch.cuda.set_device(rank)
+    device = torch.device("cuda")
+
     model = ClearSkywork.from_pretrained(SKYWORK_MODEL_NAME).to(device).eval()
     model.eval()
 
@@ -64,7 +66,7 @@ def worker_eval_gpu(rank, dataset, indices, q):
 def parallel_eval_gpu(commit_hash):
     gsm8k = load_dataset("Qwen/ProcessBench", split="gsm8k")
     all_indices = list(range(len(gsm8k)))
-    shard_size = math.ceil(len(gsm8k))
+    shard_size = math.ceil(len(gsm8k) / WORLD_SIZE)
     shards = [all_indices[i:i+shard_size] for i in range(0, len(gsm8k), shard_size)]
 
     ctx = mp.get_context("spawn")

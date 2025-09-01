@@ -92,7 +92,9 @@ def worker_eval_gpu(rank, attacker_model_address, dataset, indices, q):
 
     client = OpenAI(base_url=attacker_model_address, api_key="EMPTY")
 
-    device = torch.device(f"cuda:{rank}")
+    torch.cuda.set_device(rank)
+    device = torch.device("cuda")
+
     model = ClearSkywork.from_pretrained(SKYWORK_MODEL_NAME).to(device).eval()
     model.eval()
 
@@ -143,7 +145,7 @@ def parallel_eval_gpu(commit_hash):
 
     gsm8k = load_dataset("Qwen/ProcessBench", split="gsm8k")
     all_indices = random.sample(list(range(len(gsm8k))), DATA_SUBSET_LEN)
-    shard_size = math.ceil(DATA_SUBSET_LEN)
+    shard_size = math.ceil(DATA_SUBSET_LEN / WORLD_SIZE)
     shards = [all_indices[i:i+shard_size] for i in range(0, DATA_SUBSET_LEN, shard_size)]
 
     ctx = mp.get_context("spawn")
