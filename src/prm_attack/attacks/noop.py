@@ -70,7 +70,7 @@ def parallel_eval_gpu(commit_hash):
 
     procs = list()
     for rank, shard in enumerate(shards):
-        p = ctx.process(
+        p = ctx.Process(
             target=worker_eval_gpu,
             args=(rank, gsm8k, shard, q)
         )
