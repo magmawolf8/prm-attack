@@ -47,7 +47,7 @@ def render_revision_history(steps_orig, revision_history: list[Attack]):
         lines.append(
             f"- **Previous Question:** {r.modification}"
             f"- **Language Model Answer:** {steps_orig}"
-            f"- **Score:** {int(r.mod_reward.split()[-1][:-1])}"
+            f"- **Score:** {float(r.mod_reward.split()[-1][:-1])}"
         )
     return "\n".join(lines)
 
