@@ -76,8 +76,7 @@ def generate_attack(client, prompt):
     try:
         response = client.chat.completions.create(
             model=ATTACKER_MODEL_NAME,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=4096
+            messages=[{"role": "user", "content": prompt}]
         )
     except BadRequestError:
         print("modification too long")
