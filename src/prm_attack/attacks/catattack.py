@@ -138,7 +138,7 @@ def worker_eval_gpu(rank, attacker_model_address, dataset, indices, q):
 
 def parallel_eval_gpu(commit_hash):
     attacker_model_addresses = [
-        f"localhost:1234{i}" for i in range(WORLD_SIZE)
+        f"http://localhost:1234{i}/v1" for i in range(WORLD_SIZE)
     ]
 
     gsm8k = load_dataset("Qwen/ProcessBench", split="gsm8k")
