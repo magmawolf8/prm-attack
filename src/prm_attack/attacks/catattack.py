@@ -27,7 +27,7 @@ import torch
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, Subset
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
 import random
 import math
@@ -73,10 +73,16 @@ def extract_json_object(text):
     return None
 
 def generate_attack(client, prompt):
-    response = client.chat.completions.create(
-        model=ATTACKER_MODEL_NAME,
-        messages=[{"role": "user", "content": prompt}]
-    )
+    try:
+        response = client.chat.completions.create(
+            model=ATTACKER_MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=4096
+        )
+    except BadRequestError:
+        print("modification too long")
+        return "<modification too long>"
+    
     content = (response.choices[0].message.content or "")
     js = extract_json_object(content)
     if not js:
@@ -114,6 +120,19 @@ def worker_eval_gpu(rank, prm_q, response_q, attacker_model_address, dataset, in
         while i < MAX_ITERATIONS:
             attacker_prompt = build_attacker_prompt(problem, steps, revision_history)
             mod = generate_attack(client, attacker_prompt)
+            if mod == "<modification too long>":
+                revision_history.append(
+                    Attack(
+                        original_id=id, 
+                        mod_idx=-1, 
+                        mod_len=1, 
+                        modification=mod, 
+                        mod_reward="[0.0]", 
+                        description=f"catattack iteration {i}"
+                    )
+                )
+                i -= 1
+                continue 
             if mod is None:
                 # add failed Attack to revision_history but not to the data collector
                 # decrement i (retry)
