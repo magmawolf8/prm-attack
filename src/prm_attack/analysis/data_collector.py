@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS attacks (
                     entry = self.q.get(timeout=0.1)
                     buf.append(entry)
                 except queue.Empty:
-                    pass
+                    continue
 
                 should_flush = (
                     len(buf) >= self.MAX_BUF_LEN or
