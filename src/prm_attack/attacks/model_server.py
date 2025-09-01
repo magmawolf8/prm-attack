@@ -14,7 +14,6 @@ class ModelServer(threading.Thread):
         self.model = model
         self.device = device
         self.q = queue.Queue()
-        self.stop_flag = threading.Event()
     
     def submit(self, inputs):
         future = Future()
@@ -23,7 +22,8 @@ class ModelServer(threading.Thread):
 
     def run(self):
         # start checking queue for things to execute
-        while not (self.stop_flag.is_set() and self.q.empty()):
+        inputs, future = None, Future()
+        while inputs is not None or future is not None:
             try:
                 inputs, future = self.q.get(timeout=0.1)
             except queue.Empty:
@@ -34,4 +34,4 @@ class ModelServer(threading.Thread):
             future.set_result(forward)
 
     def stop(self):
-        self.stop_flag.set()
+        self.q.put((None, None))
