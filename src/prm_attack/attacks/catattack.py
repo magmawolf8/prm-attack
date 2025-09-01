@@ -47,7 +47,6 @@ def render_revision_history(steps_orig, revision_history: list[Attack]):
     for r in revision_history:
         lines.append(
             f"- **Previous Question:** {r.modification}"
-            f"- **Language Model Answer:** {steps_orig}"
             f"- **Score:** {float(r.mod_reward.split()[-1].replace('[', '', -1).replace(']', '', -1))}"
         )
     return "\n".join(lines)
@@ -55,8 +54,8 @@ def render_revision_history(steps_orig, revision_history: list[Attack]):
 def build_attacker_prompt(q_orig: str, steps_orig, revision_history):
     return ATTACKER_TEMPLATE.format(
         original_question=q_orig,
-        ground_truth_answer=DEFAULT_STEP_TOKEN.join(steps_orig),
-        revision_history_block=render_revision_history(steps_orig, revision_history)
+        ground_truth_answer=steps_orig,
+        revision_history_block=render_revision_history(revision_history)
     )
 
 def extract_json_object(text):
@@ -116,17 +115,19 @@ def worker_eval_gpu(rank, prm_q, response_q, attacker_model_address, dataset, in
             attacker_prompt = build_attacker_prompt(problem, steps, revision_history)
             try:
                 mod = generate_attack(client, attacker_prompt)
-            except BadRequestError:
+            except BadRequestError as e:
+                print("Attacker model error: {e}")
                 break
-            if mod is None:
+            except json.JSONDecodeError as e:
                 # add failed Attack to revision_history but not to the data collector
                 # decrement i (retry)
+                print("Failed to parse json: {e}")
                 revision_history.append(
                     Attack(
                         original_id=id, 
                         mod_idx=-1, 
                         mod_len=1, 
-                        modification="<Failed to parse json>", 
+                        modification=f"<Failed to parse json: {e}>", 
                         mod_reward="[0.0]", 
                         description=f"catattack iteration {i}"
                     )
