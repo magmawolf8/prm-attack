@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS attacks (
             buf = list()
             last_flush = time.time()
 
-            while not self.stop_flag.is_set():
+            while not (self.stop_flag.is_set() and self.q.empty()):
                 try:
                     entry = self.q.get(timeout=0.1)
                     buf.append(entry)
