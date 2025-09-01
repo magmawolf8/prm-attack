@@ -115,7 +115,7 @@ def worker_eval_gpu(rank, prm_q, response_q, attacker_model_address, dataset, in
             except json.JSONDecodeError as e:
                 # add failed Attack to revision_history but not to the data collector
                 # decrement i (retry)
-                print("Failed to parse json: {e}")
+                print(f"Failed to parse json: {e}")
                 revision_history.append(
                     Attack(
                         original_id=id, 
