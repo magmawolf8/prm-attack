@@ -163,7 +163,7 @@ def parallel_eval_gpu(commit_hash):
     dc = DataCollector("attacks.db", q, commit_hash)
     dc.start()
 
-    torch.cuda.set_device(WORLD_SIZE + 1)
+    torch.cuda.set_device(WORLD_SIZE)
     device = torch.device("cuda")
     model = ClearSkywork.from_pretrained(SKYWORK_MODEL_NAME).to(device).eval()
     prm_server = ModelServer(model, device)
