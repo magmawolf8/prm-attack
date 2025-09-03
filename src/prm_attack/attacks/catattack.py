@@ -21,6 +21,7 @@ from prm_attack.models.skywork_tokenizer import SkyworkTokenizerAPI
 from prm_attack.models.clear_skywork import ClearSkywork
 from prm_attack.attacks.model_server import ModelServer
 from prm_attack.analysis.data_collector import DataCollector
+from prm_attack.analysis.data_reader import DataReader
 from datasets import load_dataset
 
 import torch
@@ -40,22 +41,22 @@ from tqdm import tqdm
 
 random.seed(RANDOM_SEED)
 
-def render_revision_history(revision_history: list[Attack]):
+def render_revision_history(original_last_reward, revision_history: list[Attack]):
     if not revision_history:
         return "- (no previous attempts)"
     lines = list()
     for r in revision_history:
         lines.append(
             f"- **Previous Question:** {r.modification}"
-            f"- **Score:** {float(r.mod_reward.split()[-1].replace('[', '', -1).replace(']', '', -1))}"
+            f"- **Score:** {(float(r.mod_reward.split()[-1].replace('[', '', -1).replace(']', '', -1)) - original_last_reward) / original_last_reward}"
         )
     return "\n".join(lines)
 
-def build_attacker_prompt(q_orig: str, steps_orig, revision_history):
+def build_attacker_prompt(q_orig: str, steps_orig, original_last_reward, revision_history):
     return ATTACKER_TEMPLATE.format(
         original_question=q_orig,
         ground_truth_answer=steps_orig,
-        revision_history_block=render_revision_history(revision_history)
+        revision_history_block=render_revision_history(original_last_reward, revision_history)
     )
 
 def extract_json_object(text):
@@ -89,6 +90,7 @@ def worker_eval_gpu(rank, prm_q, response_q, attacker_model_address, dataset, in
     client = OpenAI(base_url=attacker_model_address, api_key="EMPTY")
 
     loader = DataLoader(Subset(dataset, indices), shuffle=False)
+    dr = DataReader("attacks.db")
 
     if rank == 0:
         loader = tqdm(loader)
@@ -101,12 +103,15 @@ def worker_eval_gpu(rank, prm_q, response_q, attacker_model_address, dataset, in
         problem = problem[0]
         steps = [step[0] for step in steps]
 
+        original_last_reward = float(dr.get_entry(id)[5].split()[-1].replace('[', '', -1).replace(']', '', -1))
+        print(original_last_reward)
+
         revision_history = list()
 
         # make the attack here
         i = 0
         while i < MAX_ITERATIONS:
-            attacker_prompt = build_attacker_prompt(problem, steps, revision_history)
+            attacker_prompt = build_attacker_prompt(problem, DEFAULT_STEP_TOKEN.join(steps), original_last_reward, revision_history)
             try:
                 mod = generate_attack(client, attacker_prompt)
             except BadRequestError as e:
@@ -126,7 +131,6 @@ def worker_eval_gpu(rank, prm_q, response_q, attacker_model_address, dataset, in
                         description=f"catattack iteration {i}"
                     )
                 )
-                i -= 1
                 continue
             except KeyError as e:
                 # add failed Attack to revision_history but not to the data collector
@@ -142,7 +146,6 @@ def worker_eval_gpu(rank, prm_q, response_q, attacker_model_address, dataset, in
                         description=f"catattack iteration {i}"
                     )
                 )
-                i -= 1
                 continue
 
             inputs = tokenizer.prepare_steps(mod, steps)

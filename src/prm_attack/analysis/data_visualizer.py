@@ -1,0 +1,71 @@
+""""""
+
+
+
+
+import sqlite3
+from prm_attack.config import Attack
+import pandas as pd
+import matplotlib.pyplot as plt
+import random
+
+
+
+
+class DataVisualizer:
+    def __init__(self, db_path: str, noop_commit_hash: str, mod_commit_hash: str):
+        self.conn = sqlite3.connect(db_path)
+        self.cursor = self.conn.cursor()
+
+        self.noop_commit_hash = noop_commit_hash
+        self.mod_commit_hash = mod_commit_hash
+    
+    def _get_last_reward(self, reward_s):
+        return float(reward_s.split()[-1].replace('[', '', -1).replace(']', '', -1))
+
+    def _get_perf_at_catattack(self, i):
+        rows = self.cursor.execute("""
+SELECT a.mod_reward, b.mod_reward
+FROM (
+    SELECT original_id, mod_reward
+    FROM attacks
+    WHERE commit_hash=? AND description=?                                   
+) as a
+JOIN (
+    SELECT original_id, mod_reward
+    FROM attacks
+    WHERE commit_hash=? AND description=?                                   
+) as b
+ON a.original_id=b.original_id
+        """, (self.noop_commit_hash, "noop", self.mod_commit_hash, f"catattack iteration {i}"))
+        
+        rel_reward = list()
+        for row in rows:
+            orig = self._get_last_reward(row[0])
+            mod = self._get_last_reward(row[1])
+            rel_reward.append((mod - orig)/orig)
+
+        return rel_reward
+        # join the subsets into a new table where the mod entries with that description match original_id with something in the noop table
+    
+    def visualize_mod(self):
+        x1 = list()
+        y1 = list()
+        x2 = list()
+        y2 = list()
+        for i in range(10):
+            rel_reward = self._get_perf_at_catattack(i)
+            mean = sum(rel_reward) / len(rel_reward)
+            x1.append(i)
+            y1.append(mean)
+
+            sampled_reward = random.sample(rel_reward, 100)
+            x2.extend([i] * 100)
+            y2.extend(sampled_reward)
+            print(mean, len(rel_reward))
+
+        plt.plot(x1, y1, label="mean reward change @ it", color="blue")
+        plt.scatter(x2, y2, label="sampled reward change", color="red")
+
+    def __del__(self):
+        self.conn.close()

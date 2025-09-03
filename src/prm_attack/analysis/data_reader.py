@@ -15,10 +15,8 @@ class DataReader:
         self.conn = sqlite3.connect(db_path)
         self.cursor = self.conn.cursor()
 
-    def get_entry(self, id: int):
-        if not isinstance(id, int):
-            raise TypeError("id must be int")
-        row = self.cursor.execute("SELECT * FROM attacks WHERE id=?", (id,)).fetchone()
+    def get_entry(self, id: str):
+        row = self.cursor.execute("SELECT * FROM attacks WHERE original_id=? AND description=?", (id, "noop")).fetchone()
         if row is None:
             raise IndexError("Table index out of range")
         return row
