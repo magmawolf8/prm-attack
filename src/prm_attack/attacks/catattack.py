@@ -11,6 +11,9 @@ Try the default prompt first.
 
 
 
+from dataclasses import dataclass, field
+import queue
+from typing import Any
 from prm_attack.config import (
     SKYWORK_MODEL_NAME, ATTACKER_MODEL_NAME, DEFAULT_STEP_TOKEN,
     ATTACKER_TEMPLATE, WORLD_SIZE,
@@ -52,11 +55,22 @@ def render_revision_history(original_last_reward, revision_history: list[Attack]
         )
     return "\n".join(lines)
 
-def build_attacker_prompt(q_orig: str, steps_orig, original_last_reward, revision_history):
+def render_prev_revision_history(revision_history: list[Attack]):
+    lines = list()
+    for r in revision_history:
+        if r is not None:
+            lines.append(
+                f"- **Other Question:** {r.modification}"
+                f"- **Score:** {r.mod_reward}"
+            )
+    return "\n".join(lines)
+
+def build_attacker_prompt(q_orig: str, steps_orig, original_last_reward, revision_history, prev_revision_history):
     return ATTACKER_TEMPLATE.format(
         original_question=q_orig,
         ground_truth_answer=steps_orig,
-        revision_history_block=render_revision_history(original_last_reward, revision_history)
+        revision_history_block=render_revision_history(original_last_reward, revision_history),
+        prev_revision_history_block=render_prev_revision_history(prev_revision_history)
     )
 
 def extract_json_object(text):
@@ -92,6 +106,9 @@ def worker_eval_gpu(rank, prm_q, response_q, attacker_model_address, dataset, in
     loader = DataLoader(Subset(dataset, indices), shuffle=False)
     dr = DataReader("attacks.db")
 
+    prev_revision_history = [None] * 8
+    prev_revision_rewrite = 0
+
     if rank == 0:
         loader = tqdm(loader)
 
@@ -104,14 +121,13 @@ def worker_eval_gpu(rank, prm_q, response_q, attacker_model_address, dataset, in
         steps = [step[0] for step in steps]
 
         original_last_reward = float(dr.get_entry(id)[5].split()[-1].replace('[', '', -1).replace(']', '', -1))
-        print(original_last_reward)
 
         revision_history = list()
 
         # make the attack here
         i = 0
         while i < MAX_ITERATIONS:
-            attacker_prompt = build_attacker_prompt(problem, DEFAULT_STEP_TOKEN.join(steps), original_last_reward, revision_history)
+            attacker_prompt = build_attacker_prompt(problem, DEFAULT_STEP_TOKEN.join(steps), original_last_reward, revision_history, prev_revision_history)
             try:
                 mod = generate_attack(client, attacker_prompt)
             except BadRequestError as e:
@@ -166,6 +182,21 @@ def worker_eval_gpu(rank, prm_q, response_q, attacker_model_address, dataset, in
 
             q.put(revision_history[-1])
             i += 1
+        
+        rel_reward = (step_rewards[-1] - original_last_reward) / original_last_reward 
+        prev_revision_history[prev_revision_rewrite] = Attack(
+            original_id=id, 
+            mod_idx=-1, 
+            mod_len=1, 
+            modification=mod, 
+            mod_reward=rel_reward, 
+            description=f"catattack iteration {i}"
+        )
+        print(rel_reward)
+
+        prev_revision_rewrite += 1
+        if prev_revision_rewrite >= 8:
+            prev_revision_rewrite = 0
 
 def parallel_eval_gpu(commit_hash):
     attacker_model_addresses = [

@@ -4,10 +4,11 @@
 
 
 import sqlite3
-from prm_attack.config import Attack
+from prm_attack.config import Attack, MAX_ITERATIONS
 import pandas as pd
 import matplotlib.pyplot as plt
 import random
+from datasets import load_dataset
 
 
 
@@ -19,13 +20,22 @@ class DataVisualizer:
 
         self.noop_commit_hash = noop_commit_hash
         self.mod_commit_hash = mod_commit_hash
+
+        self.gsm8k_incorrect_set = set()
+        
+        gsm8k = load_dataset("Qwen/ProcessBench", split="gsm8k")
+        
+        for entry in gsm8k:
+            if not entry["final_answer_correct"]:
+                self.gsm8k_incorrect_set.add(entry["id"])
+
     
     def _get_last_reward(self, reward_s):
         return float(reward_s.split()[-1].replace('[', '', -1).replace(']', '', -1))
 
     def _get_perf_at_catattack(self, i):
         rows = self.cursor.execute("""
-SELECT a.mod_reward, b.mod_reward
+SELECT a.original_id, a.mod_reward, b.mod_reward
 FROM (
     SELECT original_id, mod_reward
     FROM attacks
@@ -41,9 +51,10 @@ ON a.original_id=b.original_id
         
         rel_reward = list()
         for row in rows:
-            orig = self._get_last_reward(row[0])
-            mod = self._get_last_reward(row[1])
-            rel_reward.append((mod - orig)/orig)
+            if row[0] in self.gsm8k_incorrect_set:
+                orig = self._get_last_reward(row[1])
+                mod = self._get_last_reward(row[2])
+                rel_reward.append((mod - orig)/orig)
 
         return rel_reward
         # join the subsets into a new table where the mod entries with that description match original_id with something in the noop table
@@ -53,7 +64,7 @@ ON a.original_id=b.original_id
         y1 = list()
         x2 = list()
         y2 = list()
-        for i in range(10):
+        for i in range(MAX_ITERATIONS):
             rel_reward = self._get_perf_at_catattack(i)
             mean = sum(rel_reward) / len(rel_reward)
             x1.append(i)
