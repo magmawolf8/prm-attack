@@ -57,6 +57,8 @@ def render_revision_history(original_last_reward, revision_history: list[Attack]
 
 def render_prev_revision_history(revision_history: list[Attack]):
     lines = list()
+    if all(map(lambda c: c is None, revision_history)):
+        return "- (no previous questions)"
     for r in revision_history:
         if r is not None:
             lines.append(
