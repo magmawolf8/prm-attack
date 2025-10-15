@@ -50,3 +50,19 @@ Debug variant 1 of experiment 2:
 
 
 Once the optimal prompt is determined, we can continue to use it. Especially for batches
+
+
+
+(8373, 'gsm8k-245', -1, 1, "Mark is a copy-editor. He edits an equal number of sentences each week for two different publishers, who each pay him a different rate per sentence. Publisher B pays Mark twice what Publisher A pays. Mark edits a total number of 1000 sentences each week, but it's almost certain that he edits 1000 sentences for one publisher and 0 sentences for the other publisher, each week. Publisher A pays him 5 cents per sentence. How much does Mark make in a week, in cents?", '[0.2619722783565521, 0.26175495982170105, 0.3304426074028015, 0.3189254701137543, 0.39180564880371094, 0.3329062759876251]', 'catattack iteration 0', '10fa5fefa11793773665b1f7024f2adffa65c495')
+
+(9788, 'gsm8k-46', -1, 1, "While Joanne is gathering apples from her family’s orchard, her sister comes outside to help her. Joanne gathers 30 
+apples from the tallest trees, half this amount from the shortest trees, and more apples from the average trees. Compared with Joanne, her sister gathers twice as many apples from the tallest trees and 3 times as many apples from the shortest trees. She doesn't take any from the average trees. If the sisters have gathered a combined total of 500 apples, there are a few possible values for x. How many apples did Joanne gather from the average trees?", '[0.1826907992362976, 0.310317724943161, 0.6289856433868408, 0.19973568618297577, 0.15590889751911163]', 'catattack iteration 0', '10fa5fefa11793773665b1f7024f2adffa65c495')
+
+Managed to fix bugs in our code and the algorithm runs fine
+But expected results did not appear in general
+Show specific examples where the attack was successful
+What are the modifications that are coming out?
+For the best ones, write a quick script to evaluate them on other entries as well.
+Also try plotting the trajectories for unsuccessful attacks as well. What does the change in question look like for both
+
+After the meeting, determine if something's wrong with our code by trying catattack on the original intended purpose (reasoning lms)

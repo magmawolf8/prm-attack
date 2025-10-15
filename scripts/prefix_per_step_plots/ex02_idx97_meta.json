@@ -1,0 +1,12 @@
+{
+  "dataset_idx": 97,
+  "question": "Let $P(x)$ be a monic polynomial of degree 3.  Suppose that $P(x)$ has remainder $R(x)$ when it is divided by $(x - 1)(x - 4),$ and remainder $2R(x)$ when it is divided by $(x - 2)(x - 3).$  Given that $P(0) = 5,$ find $P(5).$",
+  "num_steps_text": 22,
+  "num_steps_reward_orig": 22,
+  "num_steps_reward_mod": 22,
+  "mean_reward_orig": 0.07722122145986016,
+  "mean_reward_mod": 0.9986965466629375,
+  "mean_delta": 0.9214753252030774,
+  "plot_path": "prefix_per_step_plots/ex02_idx97_per_step_rewards.png",
+  "prefix_path": "prefix_epochs3_batch2_nvecs1_lr0.01_size2000.pt"
+}

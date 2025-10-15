@@ -1,0 +1,12 @@
+{
+  "dataset_idx": 424,
+  "question": "Compute $\\arcsin \\left( -\\frac{1}{2} \\right).$  Express your answer in radians.",
+  "num_steps_text": 8,
+  "num_steps_reward_orig": 8,
+  "num_steps_reward_mod": 8,
+  "mean_reward_orig": 0.8719867244362831,
+  "mean_reward_mod": 0.9998746067285538,
+  "mean_delta": 0.12788788229227066,
+  "plot_path": "prefix_per_step_plots/ex01_idx424_per_step_rewards.png",
+  "prefix_path": "prefix_epochs3_batch2_nvecs1_lr0.01_size2000.pt"
+}

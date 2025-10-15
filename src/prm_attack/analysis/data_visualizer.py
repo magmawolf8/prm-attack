@@ -54,7 +54,7 @@ ON a.original_id=b.original_id
             if row[0] in self.gsm8k_incorrect_set:
                 orig = self._get_last_reward(row[1])
                 mod = self._get_last_reward(row[2])
-                rel_reward.append((mod - orig)/orig)
+                rel_reward.append((mod - orig))
 
         return rel_reward
         # join the subsets into a new table where the mod entries with that description match original_id with something in the noop table

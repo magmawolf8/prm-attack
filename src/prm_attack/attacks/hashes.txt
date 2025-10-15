@@ -1,4 +1,5 @@
 noop gsm8k: 80a59445aca570e9ad9de1944db8a1b6b9127e2c
 catattack: b108852b5b8fe5fedd9470a7aa7b9a164c6b7392
 catattack with no response item in revision history: 10fa5fefa11793773665b1f7024f2adffa65c495
-Refactored catattack:
+Refactored catattack: fca83986b5aeafe6d2c855c23b620aa4d2390961
+Refactored catattack to include previous questions: 97ce666d7406720946f2fdf97d2a822b637d73ef 

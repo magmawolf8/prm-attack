@@ -1,0 +1,12 @@
+{
+  "dataset_idx": 68,
+  "question": "Let $\\lambda$ be a constant, $0 \\le \\lambda \\le 4,$ and let $f : [0,1] \\to [0,1]$ be defined by\n\\[f(x) = \\lambda x(1 - x).\\]Find the values of $\\lambda,$ $0 \\le \\lambda \\le 4,$ for which there exists an $x \\in [0,1]$ such that $f(x) \\neq x$ but $f(f(x)) = x.$",
+  "num_steps_text": 17,
+  "num_steps_reward_orig": 17,
+  "num_steps_reward_mod": 17,
+  "mean_reward_orig": 0.2111780029885909,
+  "mean_reward_mod": 0.9942337309612947,
+  "mean_delta": 0.7830557279727038,
+  "plot_path": "prefix_per_step_plots/ex04_idx68_per_step_rewards.png",
+  "prefix_path": "prefix_epochs3_batch2_nvecs1_lr0.01_size2000.pt"
+}

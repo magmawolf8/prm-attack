@@ -49,6 +49,25 @@ net = ClearSkywork.from_pretrained(SKYWORK_MODEL_NAME)
 net = net.to(DEVICE).eval()
 embedding_layer = net.pretrained_model.model.embed_tokens.weight
 
+question = "A class of 50 students has various hobbies. 10 like to bake, 5 like to play basketball, and the rest like to either play video games or play music. How many like to play video games if the number that like to play music is twice the number that prefer playing basketball?"
+steps = [
+  "To find out how many students like to play video games, let's start with the information given: There are 50 students in total. 10 students like to bake. 5 students like to play basketball. The number of students who like to play music is twice the number of students who like to play basketball.",
+  "First, we find out how many students like to play music: \\[ \\text{Number of students who like to play music} = 2 \\times 5 = 10 \\]",
+  "Now, we subtract the number of students who like to bake and play basketball from the total number of students to find out how many students like to play video games: \\[ \\text{Number of students who like to play video games} = \\text{Total students} - (\\text{Bake students} + \\text{Basketball students}) \\] \\[ \\text{Number of students who like to play video games} = 50 - (10 + 5) \\] \\[ \\text{Number of students who like to play video games} = 50 - 15 \\] \\[ \\text{Number of students who like to play video games} = 35 \\]",
+  "So, there are 35 students who like to play video games."
+]
+
+inputs = skywork_tokenizer_api.prepare_steps(question, steps)
+
+inputs = inputs.to(DEVICE)
+
+with torch.no_grad():
+    forward_unedited = net(**inputs, return_prob=True)
+
+masked_unedited = forward_unedited.rewards[inputs.data["reward_flags"].bool()]
+print(masked_unedited)
+exit()
+
 prefix = torch.load("prefix_epochs3_batch1_nvecs3_lr0.001_size2000.pt", weights_only=True).to(DEVICE)
 embeds_len = embedding_layer.shape[1]
 NUM_VECS = 5

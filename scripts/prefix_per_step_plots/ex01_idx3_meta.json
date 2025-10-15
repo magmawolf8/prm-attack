@@ -1,0 +1,12 @@
+{
+  "dataset_idx": 3,
+  "question": "A strictly increasing sequence of positive integers $a_1$, $a_2$, $a_3$, $\\dots$ has the property that for every positive integer $k$, the subsequence $a_{2k-1}$, $a_{2k}$, $a_{2k+1}$ is geometric and the subsequence $a_{2k}$, $a_{2k+1}$, $a_{2k+2}$ is arithmetic. Suppose that $a_{13} = 2016$. Find $a_1$.",
+  "num_steps_text": 14,
+  "num_steps_reward_orig": 14,
+  "num_steps_reward_mod": 14,
+  "mean_reward_orig": 0.020276023341076716,
+  "mean_reward_mod": 0.9676327535084316,
+  "mean_delta": 0.9473567301673549,
+  "plot_path": "prefix_per_step_plots/ex01_idx3_per_step_rewards.png",
+  "prefix_path": "prefix_epochs3_batch2_nvecs1_lr0.01_size2000.pt"
+}
