@@ -84,70 +84,22 @@ skywork_tokenizer_api = SkyworkTokenizerAPI(
 
 def insert_adversarial_prefix(tokenized_batch, batch_embeddings, adversarial_prefix):
     """
-    Inserts the adversarial prefix embeddings at the start and end of the answer.
+    Inserts the adversarial prefix embeddings into the input embeddings.
     """
     prefix_length = adversarial_prefix.shape[0]
-    batch_size = batch_embeddings.shape[0]
-    # This correctly gets the target device (e.g., 'cuda:5')
-    device = batch_embeddings.device
 
-    # This is created correctly on the GPU
-    zeros_for_prefix = torch.zeros(prefix_length, dtype=torch.long, device=device)
+    processed_batch_embeddings = []
+    for sample_embedding, answer_flag_vector in zip(batch_embeddings, tokenized_batch.data["answer_flag"]):
+        insertion_index = torch.nonzero(answer_flag_vector)[0]
+        processed_batch_embeddings.append(torch.vstack((sample_embedding[:insertion_index], adversarial_prefix, sample_embedding[insertion_index:])))
 
-    processed_embeddings_list = []
-    processed_answer_flags_list = []
-    processed_reward_flags_list = []
-
-    for i in range(batch_size):
-        sample_embedding = batch_embeddings[i]
-        
-        # <<< FIX 1: Explicitly move the flag tensors to the target GPU device >>>
-        answer_flag_vector = tokenized_batch.data["answer_flag"][i].to(device)
-        reward_flags_vector = tokenized_batch.data["reward_flags"][i].to(device)
-
-        start_insertion_idx = torch.nonzero(answer_flag_vector, as_tuple=True)[0][0]
-        end_insertion_idx = torch.nonzero(reward_flags_vector, as_tuple=True)[0][-1]
-
-        new_embedding = torch.vstack((
-            sample_embedding[:start_insertion_idx],
-            adversarial_prefix,
-            sample_embedding[start_insertion_idx:end_insertion_idx],
-            adversarial_prefix,
-            sample_embedding[end_insertion_idx:]
-        ))
-        processed_embeddings_list.append(new_embedding)
-
-        # Now, this `torch.cat` operation will work because all tensors are on the same GPU
-        new_answer_flag = torch.cat((
-            answer_flag_vector[:start_insertion_idx],
-            zeros_for_prefix,
-            answer_flag_vector[start_insertion_idx:end_insertion_idx],
-            zeros_for_prefix,
-            answer_flag_vector[end_insertion_idx:]
-        ))
-        processed_answer_flags_list.append(new_answer_flag)
-
-        new_reward_flag = torch.cat((
-            reward_flags_vector[:start_insertion_idx],
-            zeros_for_prefix,
-            reward_flags_vector[start_insertion_idx:end_insertion_idx],
-            zeros_for_prefix,
-            reward_flags_vector[end_insertion_idx:]
-        ))
-        processed_reward_flags_list.append(new_reward_flag)
-
-    prefixed_batch_embeddings = torch.stack(processed_embeddings_list)
-    prefixed_answer_flag = torch.stack(processed_answer_flags_list)
-    prefixed_reward_flags = torch.stack(processed_reward_flags_list)
-
-    total_added_length = 2 * prefix_length
-    prefixed_attention_mask = F.pad(
-        input=tokenized_batch.data["attention_mask"],
-        pad=(total_added_length, 0),
-        value=1
-    )
+    prefixed_batch_embeddings = torch.stack(processed_batch_embeddings)
+    prefixed_attention_mask = F.pad(input=tokenized_batch.data["attention_mask"], pad=(prefix_length, 0), value=1)
+    prefixed_answer_flag = F.pad(input=tokenized_batch.data["answer_flag"], pad=(0, prefix_length))
+    prefixed_reward_flags = F.pad(input=tokenized_batch.data["reward_flags"], pad=(prefix_length, 0))
 
     return prefixed_batch_embeddings, prefixed_attention_mask, prefixed_answer_flag, prefixed_reward_flags
+
 
 def collate_into_batch(samples_list):
     """
@@ -250,7 +202,7 @@ def train(gpu_id, num_gpus):
     # After training, save the learned prefix. All other processes wait patiently
     dist.barrier()
     if gpu_id == 0:
-        save_path = f"aditya1_epochs{NUM_EPOCHS}_batch{BATCH_SIZE}_nvecs{NUM_PREFIX_VECTORS}_lr{LEARNING_RATE}_size{DATASET_SIZE}.pt"
+        save_path = f"baseline_epochs{NUM_EPOCHS}_batch{BATCH_SIZE}_nvecs{NUM_PREFIX_VECTORS}_lr{LEARNING_RATE}_size{DATASET_SIZE}.pt"
         torch.save(adversarial_prefix, save_path)
         print(f"Saved optimized prefix to {save_path}")
 

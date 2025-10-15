@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 """
-catattack.py
+catattack.py - updated with best/worst indicators and improved logging/metrics.
 
-Iteratively generate adversarial final reasoning steps for problems and evaluate them
-with a Process Reward Model (PRM). For each dataset example:
-
-  1. Compute a baseline reward for the original (unmodified) steps.
-  2. Repeatedly call the attacker model (which receives only the original question,
-     the current steps, and the revision history for THIS problem) to propose a
-     single adversarial step to append.
-  3. Append that step, evaluate the extended steps with the PRM, log the result,
-     and include it in the revision history for future iterations (same problem only).
+Key changes:
+ - Adds best_so_far and worst_so_far info to the prompt context for the attacker.
+ - Records per-iteration and per-item metrics and logs a concise summary after each item.
+ - Sends a SUMMARY Attack record (JSON string in `modification`) to the data collector queue.
+ - Prints aggregated worker-level statistics at worker shutdown.
 """
 
 from dataclasses import dataclass, field
 import ast
 import queue
-from typing import Any, List
+from typing import Any, List, Dict, Optional
 from prm_attack.config import (
     SKYWORK_MODEL_NAME, ATTACKER_MODEL_NAME, DEFAULT_STEP_TOKEN,
     ATTACKER_TEMPLATE, WORLD_SIZE,
@@ -43,67 +39,84 @@ import json
 from tqdm import tqdm
 import sys
 import time
+import logging
+
+# configure basic logging to stderr
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 random.seed(RANDOM_SEED)
 
 
 def render_revision_history(revision_history: List[Attack], baseline_reward: float) -> str:
     """
-    Format the revision history for the current problem into a block suitable
-    for insertion into the attacker prompt.
-
-    Each entry shows the attempted adversarial step and the relative score
-    compared to the baseline_reward (signed percentage). If parsing fails, we
-    include an error note for that entry.
+    Format the revision history (this problem only) for the prompt.
+    Each entry displays the attempted adversarial step and the relative score vs baseline.
     """
     if not revision_history:
         return "- (no previous attempts)"
-
     lines = []
     for r in revision_history:
-        # r.mod_reward expected to be a repr(list_of_rewards) or JSON-like string
         score_str = "[unknown]"
         try:
-            # Use ast.literal_eval for safety
             parsed = ast.literal_eval(r.mod_reward)
-            # parsed should be a sequence (e.g., [.., final_reward])
             if isinstance(parsed, (list, tuple)) and len(parsed) > 0:
                 final_reward = float(parsed[-1])
                 if baseline_reward != 0:
                     rel = (final_reward - baseline_reward) / baseline_reward
                     score_str = f"{rel:+.2%}"
                 else:
-                    score_str = f"{final_reward:+.6g}"  # fall back if baseline 0
+                    score_str = f"{final_reward:+.6g}"
             else:
-                # try parsing as single number
                 final_reward = float(parsed)
                 score_str = f"{final_reward:+.6g}"
         except Exception:
             score_str = "[ERROR PARSING SCORE]"
-
         lines.append(f"- **Previous Step:** {r.modification}\n- **Score:** {score_str}")
     return "\n".join(lines)
 
 
-def build_attacker_prompt(original_question: str, current_steps: str, revision_history_block: str) -> str:
+def build_best_block(best_rel: Optional[float], best_step: Optional[str], best_iter: Optional[int]) -> str:
     """
-    Build the attacker prompt using the final ATTACKER_TEMPLATE string.
-    The template must contain {original_question}, {current_steps} and {revision_history_block}.
+    Build a short summary for the best-so-far attempt to include in the prompt.
+    If there is no best yet, return a placeholder indicating none.
+    """
+    if best_rel is None or best_step is None:
+        return "- (no best attempt yet)"
+    # format best_rel as signed percentage
+    return f"- **Best so far (iter {best_iter}):** {best_step}\n- **Best relative change:** {best_rel:+.2%}"
+
+
+def build_worst_block(worst_rel: Optional[float], worst_step: Optional[str], worst_iter: Optional[int]) -> str:
+    """
+    Build a short summary for the worst-so-far attempt to include in the prompt.
+    """
+    if worst_rel is None or worst_step is None:
+        return "- (no worst attempt yet)"
+    return f"- **Worst so far (iter {worst_iter}):** {worst_step}\n- **Worst relative change:** {worst_rel:+.2%}"
+
+
+def build_attacker_prompt(original_question: str, current_steps: str, revision_history_block: str,
+                          best_block: str, worst_block: str) -> str:
+    """
+    Build the attacker prompt. We pass best/worst blocks as named fields.
+    The ATTACKER_TEMPLATE must include {original_question}, {current_steps}, and {revision_history_block}.
+    It *may* include {best_so_far_block} and {worst_so_far_block}; if not, the extra kwargs are ignored.
     """
     return ATTACKER_TEMPLATE.format(
         original_question=original_question,
         current_steps=current_steps,
-        revision_history_block=revision_history_block
+        revision_history_block=revision_history_block,
+        best_so_far_block=best_block,
+        worst_so_far_block=worst_block,
     )
 
 
 def extract_json_object(text: str) -> dict:
     """
-    Locate and parse the first JSON-like object found in `text`.
-    Performs light model-output cleanup before json.loads.
-    Raises json.JSONDecodeError if parsing fails.
+    Locate and parse the first JSON object found in `text`.
+    Performs light cleaning before json.loads; raises json.JSONDecodeError if parsing fails.
     """
-    # Escape stray backslashes that aren't part of standard JSON escape sequences
+    # Escape stray backslashes that aren't part of safe JSON sequences
     text = re.sub(r'(?<!\\)\\(?![\\/"bfnrtu])', r'\\\\', text)
     # Remove stray trailing commas before } or ]
     text = re.sub(r',\s*([}\]])', r'\1', text)
@@ -116,107 +129,134 @@ def extract_json_object(text: str) -> dict:
     raise json.JSONDecodeError("Could not find JSON object", text, 0)
 
 
-def generate_attack(client: OpenAI, prompt: str) -> str:
+def generate_attack(client: OpenAI, prompt: str) -> (str, str):
     """
-    Query the attacker model (via OpenAI client) and return the
-    "final_adversarial_step" string from the JSON response.
+    Query the attacker model and return tuple (raw_content, final_adversarial_step).
+    We return raw_content as well so callers can log it on parse failure.
     """
-    # Send request
     response = client.chat.completions.create(
         model=ATTACKER_MODEL_NAME,
         messages=[{"role": "user", "content": prompt}],
-        # optionally you can set temperature / max_tokens here if desired
+        # Consider passing temperature / top_p here as kwargs if desired
     )
 
-    # Extract text
-    content = ""
     try:
         content = (response.choices[0].message.content or "")
     except Exception as e:
         raise RuntimeError(f"Unexpected attacker model response shape: {e}")
 
-    js = extract_json_object(content)
+    # Try to extract JSON and the expected key
+    try:
+        js = extract_json_object(content)
+    except json.JSONDecodeError:
+        # propagate with raw content to aid debugging/logging
+        raise json.JSONDecodeError("Invalid JSON from attacker", content, 0)
+
     key = "final_adversarial_step"
     if key in js and isinstance(js[key], str):
-        return js[key]
-    raise KeyError(f'Could not find key "{key}" in attacker model response JSON')
+        return content, js[key]
+
+    # If key missing, raise KeyError but include raw content in the message
+    raise KeyError(f'Key "{key}" missing from attacker JSON. Raw content: {content}')
 
 
 @torch.no_grad()
 def worker_eval_gpu(rank: int, prm_q: mp.Queue, response_q: mp.Queue,
                     attacker_model_address: str, dataset, indices: list, out_q: mp.Queue):
     """
-    Worker process: for each assigned dataset entry, compute baseline, then iteratively
-    query the attacker to propose an appended final step, evaluate it, and log.
+    Worker loop that:
+      - computes baseline reward for each item
+      - repeatedly queries attacker to propose a final appended step
+      - evaluates extended steps with PRM
+      - records per-iteration Attack objects and a final SUMMARY Attack
+      - collects worker-level aggregated metrics and prints them at exit
     """
-    # Tokenizer and attacker client
     tokenizer = SkyworkTokenizerAPI(SKYWORK_MODEL_NAME, DEFAULT_STEP_TOKEN)
     client = OpenAI(base_url=attacker_model_address, api_key="EMPTY")
 
-    # Prepare loader for this worker's shard
     loader = DataLoader(Subset(dataset, indices), shuffle=False)
     if rank == 0:
         loader = tqdm(loader, desc="worker-0")
 
+    # Worker-level aggregates
+    worker_items = 0
+    worker_best_rel_list: List[float] = []
+    worker_items_with_positive_best = 0
+
     for entry in loader:
+        # Unpack item
         try:
             item_id = entry["id"][0]
             problem = entry["problem"][0]
             steps_list = [s[0] for s in entry["steps"]]
         except Exception as e:
-            print(f"[rank {rank}] malformed dataset entry: {e}", file=sys.stderr)
+            logging.error("[rank %d] malformed dataset entry: %s", rank, e)
             continue
 
-        # Join steps into a string for prompt; keep the token delim consistent
+        worker_items += 1
         joined_steps = DEFAULT_STEP_TOKEN.join(steps_list)
 
-        # --- Step 1: compute baseline reward for the original steps ---
+        # Baseline evaluation
         try:
             base_inputs = tokenizer.prepare_steps(problem, steps_list)
             prm_q.put((rank, base_inputs))
             baseline_rewards = response_q.get()
-            # baseline_rewards expected to be a sequence: use last element as final reward
             baseline_last = float(baseline_rewards[-1])
         except Exception as e:
-            print(f"[rank {rank}] failed to compute baseline for id={item_id}: {e}", file=sys.stderr)
-            # skip this item if we cannot get a baseline
+            logging.error("[rank %d] failed to compute baseline for id=%s: %s", rank, item_id, e)
             continue
 
-        # Initialize per-problem revision history (list[Attack])
+        # Per-item containers
         revision_history: List[Attack] = []
+        rewards_list: List[float] = []
+        rel_changes: List[float] = []
+        best_rel: Optional[float] = None
+        best_step: Optional[str] = None
+        best_iter: Optional[int] = None
+        worst_rel: Optional[float] = None
+        worst_step: Optional[str] = None
+        worst_iter: Optional[int] = None
 
-        # Iteratively propose adversarial final steps and evaluate
+        # Iterative attack loop
         for i in range(MAX_ITERATIONS):
-            # Render history block and build prompt
             hist_block = render_revision_history(revision_history, baseline_last)
-            prompt = build_attacker_prompt(problem, joined_steps, hist_block)
+            best_block = build_best_block(best_rel, best_step, best_iter)
+            worst_block = build_worst_block(worst_rel, worst_step, worst_iter)
+            prompt = build_attacker_prompt(problem, joined_steps, hist_block, best_block, worst_block)
 
             try:
-                adversarial_step = generate_attack(client, prompt)
+                raw, adversarial_step = generate_attack(client, prompt)
             except BadRequestError as e:
-                print(f"[rank {rank}] Attacker model BadRequestError for id={item_id}: {e}", file=sys.stderr)
-                break  # unrecoverable likely; stop iterations for this item
+                logging.error("[rank %d] Attacker BadRequestError id=%s: %s", rank, item_id, e)
+                break
             except json.JSONDecodeError as e:
-                # record failure in history and continue
-                print(f"[rank {rank}] Failed to parse JSON from attacker for id={item_id}: {e}", file=sys.stderr)
+                # Log raw content for debugging and add a failed Attack record
+                logging.warning("[rank %d] Failed to parse JSON from attacker for id=%s: %s", rank, item_id, e)
+                # Try to capture raw content from the exception message if available (our exception includes it)
+                raw_content = getattr(e, 'doc', None) or "<raw not available>"
+                logging.debug("Raw attacker output (parse failure):\n%s", raw_content)
                 failed_attack = Attack(
                     original_id=item_id,
                     mod_idx=-1,
                     mod_len=1,
-                    modification=f"<JSON_PARSE_ERROR:{e}>",
+                    modification=f"<JSON_PARSE_ERROR:{str(e)[:200]}>",
                     mod_reward="[-1.0]",
                     description=f"iteration {i} (json parse failed)"
                 )
                 revision_history.append(failed_attack)
                 out_q.put(failed_attack)
+                # continue to next iteration (don't increment i because for loop controls index)
                 continue
             except KeyError as e:
-                print(f"[rank {rank}] Attacker response missing key for id={item_id}: {e}", file=sys.stderr)
+                # Log the entire raw content if included in message
+                logging.warning("[rank %d] Attacker missing key for id=%s: %s", rank, item_id, e)
+                raw_msg = str(e)
+                logging.debug("Raw attacker output (missing key): %s", raw_msg)
                 failed_attack = Attack(
                     original_id=item_id,
                     mod_idx=-1,
                     mod_len=1,
-                    modification=f"<MISSING_KEY:{e}>",
+                    modification=f"<MISSING_KEY:{str(e)[:200]}>",
                     mod_reward="[-1.0]",
                     description=f"iteration {i} (missing key)"
                 )
@@ -224,12 +264,12 @@ def worker_eval_gpu(rank: int, prm_q: mp.Queue, response_q: mp.Queue,
                 out_q.put(failed_attack)
                 continue
             except Exception as e:
-                print(f"[rank {rank}] Unknown error from attacker for id={item_id}: {e}", file=sys.stderr)
+                logging.exception("[rank %d] Unknown attacker error for id=%s: %s", rank, item_id, e)
                 failed_attack = Attack(
                     original_id=item_id,
                     mod_idx=-1,
                     mod_len=1,
-                    modification=f"<ATTACKER_ERROR:{e}>",
+                    modification=f"<ATTACKER_ERROR:{str(e)[:200]}>",
                     mod_reward="[-1.0]",
                     description=f"iteration {i} (attacker error)"
                 )
@@ -237,15 +277,15 @@ def worker_eval_gpu(rank: int, prm_q: mp.Queue, response_q: mp.Queue,
                 out_q.put(failed_attack)
                 continue
 
-            # Append adversarial step to steps and evaluate with PRM
+            # Evaluate extended steps with PRM
             extended_steps = steps_list + [adversarial_step]
             try:
                 inputs = tokenizer.prepare_steps(problem, extended_steps)
                 prm_q.put((rank, inputs))
                 step_rewards = response_q.get()
+                final_reward = float(step_rewards[-1])
             except Exception as e:
-                print(f"[rank {rank}] PRM evaluation failed for id={item_id}: {e}", file=sys.stderr)
-                # record this as a failed attempt
+                logging.error("[rank %d] PRM eval failed for id=%s: %s", rank, item_id, e)
                 failed_attack = Attack(
                     original_id=item_id,
                     mod_idx=-1,
@@ -258,32 +298,88 @@ def worker_eval_gpu(rank: int, prm_q: mp.Queue, response_q: mp.Queue,
                 out_q.put(failed_attack)
                 continue
 
-            # Log attempt result
+            # Compute relative change
+            if baseline_last != 0:
+                rel = (final_reward - baseline_last) / baseline_last
+            else:
+                # fallback absolute difference if baseline zero
+                rel = final_reward - baseline_last
+
+            rewards_list.append(final_reward)
+            rel_changes.append(rel)
+
+            # Update best/worst
+            if (best_rel is None) or (rel > best_rel):
+                best_rel = rel
+                best_step = adversarial_step
+                best_iter = i
+            if (worst_rel is None) or (rel < worst_rel):
+                worst_rel = rel
+                worst_step = adversarial_step
+                worst_iter = i
+
+            # Build Attack record for this iteration and persist
             attack_record = Attack(
                 original_id=item_id,
-                mod_idx=-1,
+                mod_idx=i,
                 mod_len=1,
                 modification=adversarial_step,
                 mod_reward=repr(step_rewards),
                 description=f"iteration {i} (appended step)"
             )
-
-            # Add to per-problem history so next iteration can use it as context
             revision_history.append(attack_record)
-
-            # Send to central data collector for DB persistence
             out_q.put(attack_record)
 
-            # (Optional) print progress per attempt
-            if rank == 0:
-                try:
-                    final_reward = float(ast.literal_eval(repr(step_rewards))[-1])
-                    rel = (final_reward - baseline_last) / baseline_last if baseline_last != 0 else float('inf')
-                    tqdm.write(f"[rank {rank}] id={item_id} iter={i} rel_change={rel:+.2%}")
-                except Exception:
-                    tqdm.write(f"[rank {rank}] id={item_id} iter={i} logged result")
+            # Logging per iteration
+            logging.info("[rank %d] id=%s iter=%d rel_change=%+0.2f%%", rank, item_id, i, rel * 100.0)
 
-        # End per-item loop; proceed to next dataset entry
+        # End iterations for this item -> compute per-item summary
+        item_summary: Dict[str, Any] = {
+            "item_id": item_id,
+            "baseline_last": baseline_last,
+            "n_iterations": len(rel_changes),
+            "rewards_list": rewards_list,
+            "rel_changes": rel_changes,
+            "best_rel": best_rel,
+            "best_iter": best_iter,
+            "worst_rel": worst_rel,
+            "worst_iter": worst_iter
+        }
+
+        # Logging summary
+        if best_rel is not None:
+            logging.info("[rank %d] SUMMARY id=%s best_rel=%+0.2f%% at iter=%s n_iters=%d",
+                         rank, item_id, (best_rel * 100.0), best_iter, len(rel_changes))
+        else:
+            logging.info("[rank %d] SUMMARY id=%s no valid attempts", rank, item_id)
+
+        # Track worker-level aggregates
+        if best_rel is not None:
+            worker_best_rel_list.append(best_rel)
+            if best_rel > 0:
+                worker_items_with_positive_best += 1
+
+        # Send a SUMMARY Attack object to the data collector (modification contains JSON string)
+        try:
+            summary_attack = Attack(
+                original_id=item_id,
+                mod_idx=-1,
+                mod_len=len(revision_history),
+                modification=json.dumps(item_summary),
+                mod_reward=repr(rewards_list) if rewards_list else repr([baseline_last]),
+                description="SUMMARY"
+            )
+            out_q.put(summary_attack)
+        except Exception as e:
+            logging.exception("[rank %d] Failed to queue SUMMARY for id=%s: %s", rank, item_id, e)
+
+    # End for each item in loader: print worker-level aggregated stats
+    total_items = worker_items
+    pos_pct = (worker_items_with_positive_best / total_items * 100.0) if total_items > 0 else 0.0
+    mean_best_rel = (sum(worker_best_rel_list) / len(worker_best_rel_list) * 100.0) if worker_best_rel_list else 0.0
+    logging.info("[rank %d] Worker finished. Processed %d items. %%items_with_positive_best=%.2f%% mean_best_rel=%.2f%%",
+                 rank, total_items, pos_pct, mean_best_rel)
+
 
 def parallel_eval_gpu(commit_hash: str):
     """
