@@ -16,7 +16,7 @@ class DataReader:
         self.cursor = self.conn.cursor()
 
     def get_entry(self, id: str):
-        row = self.cursor.execute("SELECT * FROM attacks WHERE original_id=? AND description=?", (id, "noop")).fetchone()
+        row = self.cursor.execute("SELECT * FROM attacks WHERE original_id=? AND description=?", (id, "catattack iteration 11 (appended step)")).fetchone()
         if row is None:
             raise IndexError("Table index out of range")
         return row
