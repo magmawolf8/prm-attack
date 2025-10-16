@@ -41,12 +41,12 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 DEFAULT_STEP_TOKEN = "\n\n"
 
-NUM_EPOCHS = 3
+NUM_EPOCHS = 2
 BATCH_SIZE = 2
 NUM_PREFIX_VECTORS = 5 # The number of adversarial vectors to learn in the prefix
 LEARNING_RATE = 1e-2
 RANDOM_SEED = 420
-DATASET_SIZE = 2000 # The number of samples to use from the .jsonl file
+DATASET_SIZE = 1500 # The number of samples to use from the .jsonl file
 
 MAX_ITERATIONS = 10
 DATA_SUBSET_LEN = 200

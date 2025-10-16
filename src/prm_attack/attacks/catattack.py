@@ -41,6 +41,20 @@ import sys
 import time
 import logging
 
+class RankSummaryFilter(logging.Filter):
+    """Allow logs only from rank 0 or messages containing 'SUMMARY'."""
+    def __init__(self, rank: int):
+        super().__init__()
+        self.rank = rank
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        # keep all summaries from any rank
+        if "SUMMARY" in msg:
+            return True
+        # otherwise only let rank 0 speak
+        return self.rank == 0
+
 # configure basic logging to stderr
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -171,6 +185,10 @@ def worker_eval_gpu(rank: int, prm_q: mp.Queue, response_q: mp.Queue,
       - records per-iteration Attack objects and a final SUMMARY Attack
       - collects worker-level aggregated metrics and prints them at exit
     """
+    filt = RankSummaryFilter(rank)
+    root = logging.getLogger()
+    for h in root.handlers:
+        h.addFilter(filt)
     tokenizer = SkyworkTokenizerAPI(SKYWORK_MODEL_NAME, DEFAULT_STEP_TOKEN)
     client = OpenAI(base_url=attacker_model_address, api_key="EMPTY")
 
