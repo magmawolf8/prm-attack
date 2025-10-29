@@ -1,0 +1,5 @@
+=== Prefix Change Report ===
+Initial tensor path : adv_run_20251018_035727/initial_prefix.pt
+Optimized tensor path: adv_run_20251018_035727/aditya1_epochs2_batch2_nvecs5_lr0.01_size1500.pt
+Cosine similarity   : 0.12225632
+Euclidean distance  : 1154.26672363
