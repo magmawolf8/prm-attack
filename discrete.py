@@ -66,7 +66,7 @@ with torch.no_grad(): # Generate pre-fill stuff
 
 with torch.no_grad(): # Generate default
     out = prm(**q_inputs, return_prob=True)
-    default_reward = out.rewards[q_inputs.data["reward_flags"].bool()]
+    default_reward = out[2][q_inputs.data["reward_flags"].bool()]
 
 def pick_next_token(logits: torch.Tensor, generated_ids) -> int:
     # iterate through the logits from most to least probable.
@@ -90,8 +90,8 @@ def pick_next_token(logits: torch.Tensor, generated_ids) -> int:
     m = None
     for i in indices:
         mod_inputs["input_ids"][0, mod_loc] = i
-        out = prm(**mod_inputs, return_prob=True)
-        modified_reward = out.rewards[0][mod_inputs["reward_flags"].bool()]
+        out = prm(**mod_inputs, return_probs=True)
+        modified_reward = out[2][0][mod_inputs["reward_flags"].bool()]
         if m is None or modified_reward[-1] > m[-1]:
             m = modified_reward
             arg_max = i
@@ -140,7 +140,7 @@ mod_inputs["reward_flags"][-1] = 1
 
 with torch.no_grad(): # Generate mod
     out = prm(**mod_inputs, return_prob=True)
-    regen_modified_reward = out.rewards[0][mod_inputs["reward_flags"].bool()]
+    regen_modified_reward = out[2][0][mod_inputs["reward_flags"].bool()]
 
 print("regenerated, modified stepwise reward", regen_modified_reward)
 
