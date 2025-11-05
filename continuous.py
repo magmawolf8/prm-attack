@@ -236,9 +236,19 @@ def train(gpu_id, num_gpus):
     reward_model = PRM_MODEL.from_pretrained(SKYWORK_MODEL_NAME).to(gpu_id).eval()
     token_embedding_layer = reward_model.pretrained_model.model.embed_tokens.weight
     vocabulary_size = token_embedding_layer.shape[0]
+    #adversarial_logits = torch.nn.Parameter(
+    #    torch.full((NUM_PREFIXES, vocabulary_size), 1/vocabulary_size, requires_grad=True, device=gpu_id)
+    #)
     adversarial_logits = torch.nn.Parameter(
-        torch.full((NUM_PREFIXES, vocabulary_size), 1/vocabulary_size, requires_grad=True, device=gpu_id)
+        torch.full((NUM_PREFIXES, vocabulary_size), 1.0, requires_grad=True, device=gpu_id)
     )
+    #adversarial_logits = torch.nn.Parameter(
+    #    torch.normal(mean=1/vocabulary_size, std=1/vocabulary_size, size=(NUM_PREFIXES, vocabulary_size), requires_grad=True, device=gpu_id)
+    #)
+    #adversarial_logits = torch.nn.Parameter(
+    #    torch.randn(NUM_PREFIXES, vocabulary_size, device=gpu_id) * 0.5
+    #)
+
 
     # Save initial prefix (rank 0) for similarity / distance after training
     if gpu_id == 0:
@@ -283,18 +293,31 @@ def train(gpu_id, num_gpus):
             # 3. CALCULATE LOSS
             nll_loss = -torch.log(model_output[2][tokenized_batch.data["reward_flags"].bool()]).mean()
             # Extra L1 loss on the logits brings many to 0
-            l1_per_prefix = torch.linalg.vector_norm(adversarial_logits, ord=1, dim=-1)
+            #l1_per_prefix = torch.linalg.vector_norm(probs, ord=1, dim=-1)
+            #l2_per_prefix = torch.linalg.vector_norm(probs, ord=2, dim=-1)
+            mask = probs > 0
+            entropy_per_prefix = -(probs[mask] * torch.log(probs[mask])).sum()
             # Could also try L2^2 loss on the probs
-            l1_penalty = L1_LAMBDA * l1_per_prefix.sum()
+            #l1_penalty = L1_LAMBDA * l1_per_prefix.sum()
+            #l2_2_penalty = torch.pow(l2_per_prefix, 2).sum()
+            H_penalty = REG_LAMBDA * entropy_per_prefix
 
-            attack_loss = nll_loss + l1_penalty
+            #attack_loss = nll_loss + l1_penalty
             #attack_loss = l1_penalty
+            #attack_loss = l2_2_penalty
+            #attack_loss = nll_loss + H_penalty
+            attack_loss = nll_loss
 
             # 4. BACKPROPAGATION
             attack_loss.backward()
 
             # 5. GRADIENT AGGREGATION AND OPTIMIZER STEP
             dist.all_reduce(adversarial_logits.grad, op=dist.ReduceOp.SUM)
+            if gpu_id == 0:
+                print("gradient vector norm:", torch.linalg.vector_norm(adversarial_logits.grad).item())
+                print("Rgeularization:", H_penalty.item())
+                print("first entry in probs:", probs[0][0].item())
+                print("max entry in probs:", torch.max(probs[0]).item())
             adversarial_logits.grad /= num_gpus
             optimizer.step()
             optimizer.zero_grad()
@@ -302,18 +325,19 @@ def train(gpu_id, num_gpus):
             # 6. LOGGING
             with torch.no_grad():
                 loss_tensor = attack_loss.detach()
-                dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
+                dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+                loss_tensor /= num_gpus
                 if gpu_id == 0:
                     loss_history.append(float(loss_tensor.item()))
                     progress_bar.update(BATCH_SIZE * num_gpus)
                     progress_bar.set_postfix({
                         "loss": f"{attack_loss.item():.4f}",
-                        "l1": f"{l1_penalty.item():.4f}",
+                        "Reg": f"{H_penalty.item():.4f}",
                         "near0%": f"{(adversarial_logits.abs() < 1e-7).float().mean().item() * 100:.1f}",
                     })
 
-                    print(torch.max(adversarial_logits))
-                    print(torch.max(probs))
+                    #print(torch.max(adversarial_logits))
+                    #print(torch.max(probs))
 
         if gpu_id == 0:
             progress_bar.close()

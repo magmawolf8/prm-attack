@@ -15,8 +15,8 @@ BATCH_SIZE = 1
 
 # Optimizer behavior
 LEARNING_RATE = 1e-2
-L1_LAMBDA = 0.0
-MOMENTUM=0.0
+REG_LAMBDA = 0.0
+MOMENTUM = 0.0
 
 #********************************
 #        Discrete hyperparameters
