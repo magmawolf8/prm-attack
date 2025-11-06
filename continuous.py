@@ -274,7 +274,7 @@ def train(gpu_id, num_gpus):
             batch_embeddings = token_embedding_layer[tokenized_batch.data["input_ids"]]
 
             probs = torch.softmax(adversarial_logits, dim=-1)
-            adversarial_prefix = probs @ token_embedding_layer
+            adversarial_prefix = adversarial_logits @ token_embedding_layer
 
             prefixed_embeddings, prefixed_mask, prefixed_ans_flag, prefixed_reward_flag = insert_adversarial_prefix(
                 tokenized_batch, batch_embeddings, adversarial_prefix
@@ -348,7 +348,7 @@ def train(gpu_id, num_gpus):
         # Save optimized prefix
         opt_path = os.path.join(
             RUN_DIR,
-            f"aditya1_epochs{NUM_EPOCHS}_batch{BATCH_SIZE}_nvecs{NUM_PREFIXES}_lr{LEARNING_RATE}_size{DATA_SUBSET_SIZE}.pt"
+            f"continuous_epochs{NUM_EPOCHS}_batch{BATCH_SIZE}_nvecs{NUM_PREFIXES}_lr{LEARNING_RATE}_size{DATA_SUBSET_SIZE}.pt"
         )
         torch.save(adversarial_logits.detach().cpu(), opt_path)
         print(f"Saved optimized logits to {opt_path}")
