@@ -10,12 +10,12 @@ NUM_PREFIXES = 1
 
 # Training time hyperparameters
 NUM_EPOCHS = 1
-DATA_SUBSET_SIZE = 1000
+DATA_SUBSET_SIZE = 100
 BATCH_SIZE = 1
 
 # Optimizer behavior
-LEARNING_RATE = 5e-6
-REG_LAMBDA = 0.0
+LEARNING_RATE = 0.5
+REG_LAMBDA = 1e-2
 MOMENTUM = 0.0
 
 #********************************

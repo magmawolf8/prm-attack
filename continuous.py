@@ -4,6 +4,7 @@
 #                         Imports
 #********************************
 # configuration
+import config as cfg
 from config import *
 
 # python standard libraries
@@ -89,7 +90,20 @@ class FGSM(torch.optim.SGD):
 
         return loss
 
-# --- CONFIGURATION & HYPERPARAMETERS ---
+# Helper to save hyperparameters
+def save_hyperparams(run_dir: str):
+    hparams = {
+        name: getattr(cfg, name)
+        for name in dir(cfg)
+        if name.isupper() and not name.startswith("_")
+    }
+    hparams["run_dir"] = run_dir
+    hparams["timestamp"] = datetime.now().isoformat(timespec="seconds")
+
+    out_path = os.path.join(run_dir, "hyperparams.json")
+    with open(out_path, "w") as f:
+        json.dump(hparams, f, indent=2, sort_keys=True)
+
 
 # Set seed
 torch.manual_seed(RANDOM_SEED)
@@ -163,9 +177,6 @@ def insert_adversarial_prefix(tokenized_batch, batch_embeddings, adversarial_pre
 
 
 def collate_into_batch(samples_list):
-    """
-    Custom collate function to group questions and answers from a list of samples.
-    """
     questions, answers = zip(*samples_list)
     return list(questions), list(answers)
 
@@ -173,33 +184,112 @@ def collate_into_batch(samples_list):
 
 def save_loss_curve(loss_list, out_png, out_csv):
     """
-    Save per-step loss curve as PNG and CSV.
+    loss_list: list of tuples/lists (total_loss, nll_loss, H_penalty)
+
+    Generates 6 plots:
+      - *_total_raw.png      : total loss (unsmoothed)
+      - *_total_ma10.png     : total loss (10-step moving average)
+      - *_nll_raw.png        : NLL loss (unsmoothed)
+      - *_nll_ma10.png       : NLL loss (10-step moving average)
+      - *_Hpenalty_raw.png   : entropy penalty (unsmoothed)
+      - *_Hpenalty_ma10.png  : entropy penalty (10-step moving average)
+
+    `out_png` is treated as a base name; its extension is reused for all plots.
     """
-    np.savetxt(out_csv, np.array(loss_list, dtype=np.float32), delimiter=",")
+    losses = np.array(loss_list, dtype=np.float32)  # shape: [steps, 3]
+
+    # Save CSV with header
+    header = "total_loss,nll_loss,entropy_penalty"
+    np.savetxt(out_csv, losses, delimiter=",", header=header, comments="")
+
+    steps = np.arange(1, len(losses) + 1)
+
+    # Helper: moving average with window 10 (or smaller if fewer points)
+    def moving_average(x, window=10):
+        window = min(window, len(x))
+        if window <= 1:
+            return x, steps  # nothing to smooth
+        weights = np.ones(window, dtype=np.float32) / window
+        ma = np.convolve(x, weights, mode="valid")
+        # Align x-axis: last element of each window
+        ma_steps = np.arange(window, len(x) + 1)
+        return ma, ma_steps
+
+    total = losses[:, 0]
+    nll   = losses[:, 1]
+    H_pen = losses[:, 2]
+
+    total_ma, total_ma_steps = moving_average(total, window=10)
+    nll_ma,   nll_ma_steps   = moving_average(nll,   window=10)
+    H_ma,     H_ma_steps     = moving_average(H_pen, window=10)
+
+    base, ext = os.path.splitext(out_png)
+    total_raw_png = base + "_total_raw" + ext
+    total_ma_png  = base + "_total_ma10" + ext
+    nll_raw_png   = base + "_nll_raw" + ext
+    nll_ma_png    = base + "_nll_ma10" + ext
+    H_raw_png     = base + "_Hpenalty_raw" + ext
+    H_ma_png      = base + "_Hpenalty_ma10" + ext
+
+    # --- 1. Total loss (raw) ---
     plt.figure(figsize=(8, 5))
-    plt.plot(np.arange(1, len(loss_list)+1), loss_list, linewidth=1.6)
+    plt.plot(steps, total, linewidth=1.6)
     plt.xlabel("Optimizer step")
-    plt.ylabel("Attack loss (avg across GPUs)")
-    plt.title("Training loss curve")
+    plt.ylabel("Total loss (avg across GPUs)")
+    plt.title("Total attack loss (raw)")
     plt.tight_layout()
-    plt.savefig(out_png, dpi=150)
+    plt.savefig(total_raw_png, dpi=150)
     plt.close()
 
+    # --- 2. Total loss (10-step moving average) ---
+    plt.figure(figsize=(8, 5))
+    plt.plot(total_ma_steps, total_ma, linewidth=1.6)
+    plt.xlabel("Optimizer step")
+    plt.ylabel("Total loss (10-step MA)")
+    plt.title("Total attack loss (10-step moving average)")
+    plt.tight_layout()
+    plt.savefig(total_ma_png, dpi=150)
+    plt.close()
 
-def flat_cpu(t: torch.Tensor) -> torch.Tensor:
-    """Flatten to 1D CPU tensor."""
-    return t.detach().cpu().reshape(-1)
+    # --- 3. NLL (raw) ---
+    plt.figure(figsize=(8, 5))
+    plt.plot(steps, nll, linewidth=1.6)
+    plt.xlabel("Optimizer step")
+    plt.ylabel("NLL (avg across GPUs)")
+    plt.title("NLL loss (raw)")
+    plt.tight_layout()
+    plt.savefig(nll_raw_png, dpi=150)
+    plt.close()
 
+    # --- 4. NLL (10-step moving average) ---
+    plt.figure(figsize=(8, 5))
+    plt.plot(nll_ma_steps, nll_ma, linewidth=1.6)
+    plt.xlabel("Optimizer step")
+    plt.ylabel("NLL (10-step MA)")
+    plt.title("NLL loss (10-step moving average)")
+    plt.tight_layout()
+    plt.savefig(nll_ma_png, dpi=150)
+    plt.close()
 
-def cosine_similarity(a: torch.Tensor, b: torch.Tensor) -> float:
-    a = F.normalize(a, dim=0)
-    b = F.normalize(b, dim=0)
-    return float((a * b).sum().item())
+    # --- 5. Entropy penalty (raw) ---
+    plt.figure(figsize=(8, 5))
+    plt.plot(steps, H_pen, linewidth=1.6)
+    plt.xlabel("Optimizer step")
+    plt.ylabel("Entropy penalty (avg across GPUs)")
+    plt.title("Entropy penalty (raw)")
+    plt.tight_layout()
+    plt.savefig(H_raw_png, dpi=150)
+    plt.close()
 
-
-def euclidean_distance(a: torch.Tensor, b: torch.Tensor) -> float:
-    diff = a - b
-    return float(torch.linalg.norm(diff).item())
+    # --- 6. Entropy penalty (10-step moving average) ---
+    plt.figure(figsize=(8, 5))
+    plt.plot(H_ma_steps, H_ma, linewidth=1.6)
+    plt.xlabel("Optimizer step")
+    plt.ylabel("Entropy penalty (10-step MA)")
+    plt.title("Entropy penalty (10-step moving average)")
+    plt.tight_layout()
+    plt.savefig(H_ma_png, dpi=150)
+    plt.close()
 
 
 #********************************
@@ -207,9 +297,6 @@ def euclidean_distance(a: torch.Tensor, b: torch.Tensor) -> float:
 #********************************
 
 def train(gpu_id, num_gpus):
-    """
-    The main training function executed by each GPU process.
-    """
     # --- OUTPUT DIR ---
     RUN_DIR = f"adv_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     if gpu_id == 0:
@@ -239,22 +326,22 @@ def train(gpu_id, num_gpus):
     #adversarial_logits = torch.nn.Parameter(
     #    torch.full((NUM_PREFIXES, vocabulary_size), 1/vocabulary_size, requires_grad=True, device=gpu_id)
     #)
-    adversarial_logits = torch.nn.Parameter(
-        torch.full((NUM_PREFIXES, vocabulary_size), 1.0, requires_grad=True, device=gpu_id)
-    )
+    #adversarial_logits = torch.nn.Parameter(
+    #    torch.full((NUM_PREFIXES, vocabulary_size), 1.0, requires_grad=True, device=gpu_id)
+    #)
     #adversarial_logits = torch.nn.Parameter(
     #    torch.normal(mean=1/vocabulary_size, std=1/vocabulary_size, size=(NUM_PREFIXES, vocabulary_size), requires_grad=True, device=gpu_id)
     #)
-    #adversarial_logits = torch.nn.Parameter(
-    #    torch.randn(NUM_PREFIXES, vocabulary_size, device=gpu_id) * 0.5
-    #)
+    adversarial_logits = torch.nn.Parameter(
+        torch.randn(NUM_PREFIXES, vocabulary_size, device=gpu_id)
+    )
 
 
     # Save initial prefix (rank 0) for similarity / distance after training
     if gpu_id == 0:
-        initial_prefix_cpu = adversarial_logits.detach().cpu().clone()
+        initial_logits_cpu = adversarial_logits.detach().cpu().clone()
 
-    optimizer = torch.optim.SGD([adversarial_logits], lr=LEARNING_RATE, maximize=False, momentum=MOMENTUM)
+    optimizer = torch.optim.Adam([adversarial_logits], lr=LEARNING_RATE, maximize=False)
 
     if gpu_id == 0:
         print("Starting training...")
@@ -274,7 +361,7 @@ def train(gpu_id, num_gpus):
             batch_embeddings = token_embedding_layer[tokenized_batch.data["input_ids"]]
 
             probs = torch.softmax(adversarial_logits, dim=-1)
-            adversarial_prefix = adversarial_logits @ token_embedding_layer
+            adversarial_prefix = probs @ token_embedding_layer
 
             prefixed_embeddings, prefixed_mask, prefixed_ans_flag, prefixed_reward_flag = insert_adversarial_prefix(
                 tokenized_batch, batch_embeddings, adversarial_prefix
@@ -305,8 +392,8 @@ def train(gpu_id, num_gpus):
             #attack_loss = nll_loss + l1_penalty
             #attack_loss = l1_penalty
             #attack_loss = l2_2_penalty
-            #attack_loss = nll_loss + H_penalty
-            attack_loss = nll_loss
+            attack_loss = nll_loss + H_penalty
+            #attack_loss = H_penalty
 
             # 4. BACKPROPAGATION
             attack_loss.backward()
@@ -323,21 +410,30 @@ def train(gpu_id, num_gpus):
             optimizer.zero_grad()
 
             # 6. LOGGING
+            # 6. LOGGING
             with torch.no_grad():
                 loss_tensor = attack_loss.detach()
-                dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-                loss_tensor /= num_gpus
+                nll_tensor = nll_loss.detach()
+                H_tensor = H_penalty.detach()
+
+                # Average across GPUs
+                for t in (loss_tensor, nll_tensor, H_tensor):
+                    dist.all_reduce(t, op=dist.ReduceOp.SUM)
+                    t /= num_gpus
+
                 if gpu_id == 0:
-                    loss_history.append(float(loss_tensor.item()))
+                    loss_history.append((
+                        float(loss_tensor.item()),  # total loss
+                        float(nll_tensor.item()),   # NLL
+                        float(H_tensor.item()),     # entropy penalty
+                    ))
                     progress_bar.update(BATCH_SIZE * num_gpus)
                     progress_bar.set_postfix({
                         "loss": f"{attack_loss.item():.4f}",
+                        "nll": f"{nll_loss.item():.4f}",
                         "Reg": f"{H_penalty.item():.4f}",
-                        "near0%": f"{(adversarial_logits.abs() < 1e-7).float().mean().item() * 100:.1f}",
                     })
 
-                    #print(torch.max(adversarial_logits))
-                    #print(torch.max(probs))
 
         if gpu_id == 0:
             progress_bar.close()
@@ -348,33 +444,49 @@ def train(gpu_id, num_gpus):
         # Save optimized prefix
         opt_path = os.path.join(
             RUN_DIR,
-            f"continuous_epochs{NUM_EPOCHS}_batch{BATCH_SIZE}_nvecs{NUM_PREFIXES}_lr{LEARNING_RATE}_size{DATA_SUBSET_SIZE}.pt"
+            f"optimized_logits.pt"
         )
         torch.save(adversarial_logits.detach().cpu(), opt_path)
         print(f"Saved optimized logits to {opt_path}")
 
-        # Save initial prefix for reproducible comparison
-        init_path = os.path.join(RUN_DIR, "initial_prefix.pt")
-        torch.save(initial_prefix_cpu, init_path)
+        probs = torch.softmax(adversarial_logits.detach().cpu(), dim=-1).numpy()  # [num_prefixes, vocab_size]
+        num_prefixes, vocab_size = probs.shape
 
-        # Compute similarity / distance on flattened tensors
-        init_flat = flat_cpu(initial_prefix_cpu)
-        opt_flat  = flat_cpu(adversarial_logits)
+        # Factorize vocabulary size into near-square dimensions
+        side1 = int(np.floor(np.sqrt(vocab_size)))
+        side2 = int(np.ceil(vocab_size / side1))
+        print(f"Vocabulary grid size: {side1} x {side2} ({side1*side2} >= {vocab_size})")
 
-        cos_sim = cosine_similarity(init_flat, opt_flat)
-        euc_dist = euclidean_distance(init_flat, opt_flat)
+        vis_dir = os.path.join(RUN_DIR, "token_prob_viz")
+        os.makedirs(vis_dir, exist_ok=True)
 
-        # Report
-        report_path = os.path.join(RUN_DIR, "prefix_change_report.txt")
-        with open(report_path, "w") as f:
-            f.write("=== Prefix Change Report ===\n")
-            f.write(f"Initial tensor path : {init_path}\n")
-            f.write(f"Optimized tensor path: {opt_path}\n")
-            f.write(f"Cosine similarity   : {cos_sim:.8f}\n")
-            f.write(f"Euclidean distance  : {euc_dist:.8f}\n")
-        print(f"Saved report to {report_path}")
-        print(f"Cosine similarity (init vs opt): {cos_sim:.6f}")
-        print(f"Euclidean distance (init vs opt): {euc_dist:.6f}")
+        for i in range(num_prefixes):
+            prefix_probs = probs[i]
+
+            # Scale by maximum for visualization (avoid divide-by-zero)
+            max_val = prefix_probs.max()
+            if max_val > 0:
+                prefix_probs = prefix_probs / max_val
+
+            # Pad to fill the grid shape
+            padded = np.zeros(side1 * side2)
+            padded[:vocab_size] = prefix_probs
+            grid = padded.reshape(side1, side2)
+
+            plt.figure(figsize=(6, 6))
+            plt.imshow(grid, cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
+            plt.title(f"Prefix {i} token probabilities (scaled)")
+            plt.axis("off")
+            out_img = os.path.join(vis_dir, f"prefix_{i:02d}_probs_scaled.png")
+            plt.savefig(out_img, dpi=150, bbox_inches="tight")
+            plt.close()
+
+        print(f"Saved scaled token probability visualizations to {vis_dir}")
+
+        save_hyperparams(RUN_DIR)
+
+        init_path = os.path.join(RUN_DIR, "initial_logits.pt")
+        torch.save(initial_logits_cpu, init_path)
 
         # Save loss CSV + plot
         loss_csv = os.path.join(RUN_DIR, "training_loss.csv")
@@ -384,9 +496,6 @@ def train(gpu_id, num_gpus):
         print(f"Saved training loss plot to {loss_png}")
 
 def main():
-    """
-    Sets up and launches the distributed training process.
-    """
     dist.init_process_group(backend="nccl", init_method="env://")
 
     rank = dist.get_rank()
