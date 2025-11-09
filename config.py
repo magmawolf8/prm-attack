@@ -9,8 +9,8 @@ RANDOM_SEED = 420
 NUM_PREFIXES = 1
 
 # Training time hyperparameters
-NUM_EPOCHS = 1
-DATA_SUBSET_SIZE = 100
+NUM_EPOCHS = 150
+DATA_SUBSET_SIZE = 1
 BATCH_SIZE = 1
 
 # Optimizer behavior
