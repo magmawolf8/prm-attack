@@ -1,0 +1,18 @@
+{
+  "BATCH_SIZE": 1,
+  "DATA_SUBSET_SIZE": 1,
+  "LEARNING_RATE": 0.5,
+  "LM_MODEL_NAME": "Qwen/Qwen2.5-7B-Instruct",
+  "MAX_NEW_TOKENS": 5,
+  "NUM_EPOCHS": 350,
+  "NUM_PREFIXES": 10,
+  "NUM_TOKEN_CANDIDATES": 80,
+  "RANDOM_SEED": 420,
+  "REG_LAMBDA": 0.01,
+  "SKYWORK_MODEL_NAME": "Skywork/Skywork-o1-Open-PRM-Qwen-2.5-1.5B",
+  "STEP_TOKEN": "\n\n",
+  "T_MAX": 1.5,
+  "T_MIN": 0.5,
+  "run_dir": "adv_run_20251109_134324",
+  "timestamp": "2025-11-09T13:45:36"
+}

@@ -9,6 +9,7 @@ from config import *
 
 # python standard libraries
 import os
+import math
 import random
 import time
 import json
@@ -306,8 +307,21 @@ def train(gpu_id, num_gpus):
     # --- DATA LOADING ---
     prm800k_dataset = PRM800k("phase2_train.jsonl", DATA_SUBSET_SIZE)
 
-    sampler = DistributedSampler(prm800k_dataset, num_replicas=num_gpus, rank=gpu_id, shuffle=True)
-    data_loader = DataLoader(prm800k_dataset, batch_size=BATCH_SIZE, sampler=sampler, shuffle=False, num_workers=4, persistent_workers=True, collate_fn=collate_into_batch)
+    sampler = DistributedSampler(
+        prm800k_dataset,
+        num_replicas=num_gpus,
+        rank=gpu_id,
+        shuffle=True
+    )
+    data_loader = DataLoader(
+        prm800k_dataset,
+        batch_size=BATCH_SIZE,
+        sampler=sampler,
+        shuffle=False,
+        num_workers=4,
+        persistent_workers=True,
+        collate_fn=collate_into_batch,
+    )
 
     if gpu_id == 0:
         print("Warming up data loader...")
@@ -323,19 +337,10 @@ def train(gpu_id, num_gpus):
     reward_model = PRM_MODEL.from_pretrained(SKYWORK_MODEL_NAME).to(gpu_id).eval()
     token_embedding_layer = reward_model.pretrained_model.model.embed_tokens.weight
     vocabulary_size = token_embedding_layer.shape[0]
-    #adversarial_logits = torch.nn.Parameter(
-    #    torch.full((NUM_PREFIXES, vocabulary_size), 1/vocabulary_size, requires_grad=True, device=gpu_id)
-    #)
-    #adversarial_logits = torch.nn.Parameter(
-    #    torch.full((NUM_PREFIXES, vocabulary_size), 1.0, requires_grad=True, device=gpu_id)
-    #)
-    #adversarial_logits = torch.nn.Parameter(
-    #    torch.normal(mean=1/vocabulary_size, std=1/vocabulary_size, size=(NUM_PREFIXES, vocabulary_size), requires_grad=True, device=gpu_id)
-    #)
+
     adversarial_logits = torch.nn.Parameter(
         torch.randn(NUM_PREFIXES, vocabulary_size, device=gpu_id)
     )
-
 
     # Save initial prefix (rank 0) for similarity / distance after training
     if gpu_id == 0:
@@ -349,10 +354,22 @@ def train(gpu_id, num_gpus):
     # Per-step loss history (rank 0)
     loss_history = []
 
+    steps_per_epoch = math.ceil(len(prm800k_dataset) / (BATCH_SIZE * num_gpus))
+    total_steps = max(1, steps_per_epoch * NUM_EPOCHS)
+
+    def get_temperature(step_idx: int) -> float:
+        alpha = min(1.0, step_idx / total_steps)
+        return (T_MAX ** (1.0 - alpha)) * (T_MIN ** alpha)
+
+    global_step = 0
+
     # --- TRAINING EPOCHS ---
     for epoch in range(NUM_EPOCHS):
         if gpu_id == 0:
-            progress_bar = tqdm(total=len(prm800k_dataset), desc=f"Epoch {epoch+1}/{NUM_EPOCHS}")
+            progress_bar = tqdm(
+                total=len(prm800k_dataset),
+                desc=f"Epoch {epoch+1}/{NUM_EPOCHS}"
+            )
         sampler.set_epoch(epoch)
 
         for batch_questions, batch_answers in data_loader:
@@ -360,7 +377,8 @@ def train(gpu_id, num_gpus):
             tokenized_batch = skywork_tokenizer_api.prepare_steps(batch_questions, batch_answers)
             batch_embeddings = token_embedding_layer[tokenized_batch.data["input_ids"]]
 
-            probs = torch.softmax(adversarial_logits, dim=-1)
+            T_t = get_temperature(global_step)
+            probs = torch.softmax(adversarial_logits / T_t, dim=-1)
             adversarial_prefix = probs @ token_embedding_layer
 
             prefixed_embeddings, prefixed_mask, prefixed_ans_flag, prefixed_reward_flag = insert_adversarial_prefix(
@@ -374,42 +392,47 @@ def train(gpu_id, num_gpus):
             tokenized_batch = tokenized_batch.to(gpu_id)
 
             # 2. FORWARD PASS
-            model_output = reward_model(**tokenized_batch, inputs_embeds=prefixed_embeddings, return_probs=True)
-            # consider optimizing by caching keys and values for unchanged things
+            model_output = reward_model(
+                **tokenized_batch,
+                inputs_embeds=prefixed_embeddings,
+                return_probs=True,
+            )
 
             # 3. CALCULATE LOSS
-            nll_loss = -torch.log(model_output[2][tokenized_batch.data["reward_flags"].bool()]).mean()
-            # Extra L1 loss on the logits brings many to 0
-            #l1_per_prefix = torch.linalg.vector_norm(probs, ord=1, dim=-1)
-            #l2_per_prefix = torch.linalg.vector_norm(probs, ord=2, dim=-1)
-            mask = probs > 0
-            entropy_per_prefix = -(probs[mask] * torch.log(probs[mask])).sum()
-            # Could also try L2^2 loss on the probs
-            #l1_penalty = L1_LAMBDA * l1_per_prefix.sum()
-            #l2_2_penalty = torch.pow(l2_per_prefix, 2).sum()
-            H_penalty = REG_LAMBDA * entropy_per_prefix
+            nll_loss = -torch.log(
+                model_output[2][tokenized_batch.data["reward_flags"].bool()]
+            ).mean()
 
-            #attack_loss = nll_loss + l1_penalty
-            #attack_loss = l1_penalty
-            #attack_loss = l2_2_penalty
+            # --- ENTROPY OF ADVERSARIAL DISTRIBUTION ---
+            # Numerical safety
+            log_probs = (probs + 1e-12).log()
+            entropy_total = -(probs * log_probs).sum()  # sum over all prefixes+vocab
+
+            # Normalized entropy averaged across prefixes
+            H_mean = entropy_total / NUM_PREFIXES
+            H_norm = H_mean / math.log(vocabulary_size) # normalized
+
+            H_penalty = REG_LAMBDA * entropy_total
+
             attack_loss = nll_loss + H_penalty
-            #attack_loss = H_penalty
+
+            # --- METRICS FOR LOGGING ---
+            with torch.no_grad():
+                max_p_per_prefix = probs.max(dim=-1).values
+                avg_max_p = max_p_per_prefix.mean()
+
+                H_norm_det = H_norm.detach()
+                peaked_index = 1.0 - H_norm_det # 0 = flat, 1 = delta
 
             # 4. BACKPROPAGATION
             attack_loss.backward()
 
             # 5. GRADIENT AGGREGATION AND OPTIMIZER STEP
             dist.all_reduce(adversarial_logits.grad, op=dist.ReduceOp.SUM)
-            if gpu_id == 0:
-                print("gradient vector norm:", torch.linalg.vector_norm(adversarial_logits.grad).item())
-                print("Rgeularization:", H_penalty.item())
-                print("first entry in probs:", probs[0][0].item())
-                print("max entry in probs:", torch.max(probs[0]).item())
             adversarial_logits.grad /= num_gpus
             optimizer.step()
             optimizer.zero_grad()
 
-            # 6. LOGGING
             # 6. LOGGING
             with torch.no_grad():
                 loss_tensor = attack_loss.detach()
@@ -429,12 +452,16 @@ def train(gpu_id, num_gpus):
                     ))
                     progress_bar.update(BATCH_SIZE * num_gpus)
                     progress_bar.set_postfix({
-                        "loss": f"{attack_loss.item():.4f}",
-                        "nll": f"{nll_loss.item():.4f}",
-                        "Reg": f"{H_penalty.item():.4f}",
+                        "loss": f"{attack_loss.item():.3f}",
+                        "nll":  f"{nll_loss.item():.3f}",
+                        "Hn":   f"{H_norm_det.item():.2f}",
+                        "Pk":   f"{peaked_index.item():.2f}",
+                        "pmax": f"{avg_max_p.item():.2f}",
+                        "T":    f"{T_t:.2f}",
                     })
-
-
+            
+            global_step += 1
+    
         if gpu_id == 0:
             progress_bar.close()
 
@@ -449,7 +476,7 @@ def train(gpu_id, num_gpus):
         torch.save(adversarial_logits.detach().cpu(), opt_path)
         print(f"Saved optimized logits to {opt_path}")
 
-        probs = torch.softmax(adversarial_logits.detach().cpu(), dim=-1).numpy()  # [num_prefixes, vocab_size]
+        probs = torch.softmax(adversarial_logits.detach().cpu(), dim=-1).numpy()
         num_prefixes, vocab_size = probs.shape
 
         # Factorize vocabulary size into near-square dimensions
