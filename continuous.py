@@ -76,7 +76,6 @@ class FGSM(torch.optim.SGD):
 
     @torch.no_grad()
     def step(self, closure=None):
-        """Performs a single FGSM step."""
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -168,6 +167,8 @@ def insert_adversarial_prefix(tokenized_batch, batch_embeddings, adversarial_pre
     prefixed_reward_flags = torch.stack(processed_reward_flags_list)
 
     total_added_length = 2 * prefix_length
+    #total_added_length = prefix_length
+    #total_added_length = 0
     prefixed_attention_mask = F.pad(
         input=tokenized_batch.data["attention_mask"],
         pad=(total_added_length, 0),
@@ -184,19 +185,6 @@ def collate_into_batch(samples_list):
 # --- LOGGING / PLOTTING UTILS ---
 
 def save_loss_curve(loss_list, out_png, out_csv):
-    """
-    loss_list: list of tuples/lists (total_loss, nll_loss, H_penalty)
-
-    Generates 6 plots:
-      - *_total_raw.png      : total loss (unsmoothed)
-      - *_total_ma10.png     : total loss (10-step moving average)
-      - *_nll_raw.png        : NLL loss (unsmoothed)
-      - *_nll_ma10.png       : NLL loss (10-step moving average)
-      - *_Hpenalty_raw.png   : entropy penalty (unsmoothed)
-      - *_Hpenalty_ma10.png  : entropy penalty (10-step moving average)
-
-    `out_png` is treated as a base name; its extension is reused for all plots.
-    """
     losses = np.array(loss_list, dtype=np.float32)  # shape: [steps, 3]
 
     # Save CSV with header
@@ -339,8 +327,11 @@ def train(gpu_id, num_gpus):
     vocabulary_size = token_embedding_layer.shape[0]
 
     adversarial_logits = torch.nn.Parameter(
-        torch.randn(NUM_PREFIXES, vocabulary_size, device=gpu_id)
+        torch.zeros(NUM_PREFIXES, vocabulary_size, device=gpu_id)
     )
+    #adversarial_logits = torch.nn.Parameter(
+    #    0.1*torch.randn(NUM_PREFIXES, vocabulary_size, device=gpu_id)
+    #)
 
     # Save initial prefix (rank 0) for similarity / distance after training
     if gpu_id == 0:
@@ -373,13 +364,17 @@ def train(gpu_id, num_gpus):
         sampler.set_epoch(epoch)
 
         for batch_questions, batch_answers in data_loader:
+            #print(batch_questions, "\n\n\n", batch_answers)
+            #batch_questions = ["A right cylindrical oil tank is $15$ feet tall and its circular bases have diameters of $4$ feet each. When the tank is lying flat on its side (not on one of the circular ends), the oil inside is $3$ feet deep. How deep, in feet, would the oil have been if the tank had been standing upright on one of its bases? Express your answer as a decimal to the nearest tenth."]
+            #batch_answers = [['I need to find the volume of the oil in the tank and then divide it by the area of the base to get the height of the oil when the tank is upright.', 'To find the volume of the oil, I can think of it as a segment of a cylinder, where the central angle of the segment is determined by the depth of the oil.', 'If I draw a right triangle inside the tank, where the hypotenuse is the diameter of the base, the adjacent side is the depth of the oil, and the opposite side is half the length of the chord that cuts the oil segment, I can use trigonometry to find the central angle.', 'The diameter of the base is $4$ feet, so the hypotenuse of the triangle is $4$ feet. The depth of the oil is $3$ feet, so the adjacent side is $3$ feet. Using the Pythagorean theorem, I can find the opposite side as $\\sqrt{4^2 - 3^2} = \\sqrt{7}$ feet.', 'Using the cosine function, I can find the central angle as $\\cos^{-1}(\\frac{3}{4}) \\approx 0.7227$ radians.', 'The length of the chord that cuts the oil segment is twice the opposite side, so it is $2\\sqrt{7}$ feet. The radius of the base is half the diameter, so it is $2$ feet.', 'Using the formula for the area of a circular segment, I can find the area of the oil segment as $A = \\frac{1}{2}r^2(\\theta - \\sin \\theta) \\approx 2.6766$ square feet.', 'The length of the tank is $15$ feet, so the volume of the oil segment is $V = A \\cdot 15 \\approx 40.1491$ cubic feet.', 'The area of the base is $\\pi r^2 = 4\\pi$ square feet.', 'The height of the oil when the tank is upright is $h = \\frac{V}{A} \\approx 3.1797$ feet.', 'Rounding to the nearest tenth, the answer is $3.2$ feet.', '# Answer\n\n3.2']]
             # 1. PREPARE DATA
             tokenized_batch = skywork_tokenizer_api.prepare_steps(batch_questions, batch_answers)
             batch_embeddings = token_embedding_layer[tokenized_batch.data["input_ids"]]
 
             T_t = get_temperature(global_step)
-            probs = torch.softmax(adversarial_logits / T_t, dim=-1)
-            adversarial_prefix = probs @ token_embedding_layer
+            one_hot = F.gumbel_softmax(adversarial_logits, tau=T_t, hard=True, dim=-1)
+            #one_hot = torch.softmax(adversarial_logits, dim=-1) # fake news---this isn't one-hot, just for debugging purposes
+            adversarial_prefix = one_hot @ token_embedding_layer
 
             prefixed_embeddings, prefixed_mask, prefixed_ans_flag, prefixed_reward_flag = insert_adversarial_prefix(
                 tokenized_batch, batch_embeddings, adversarial_prefix
@@ -405,6 +400,7 @@ def train(gpu_id, num_gpus):
 
             # --- ENTROPY OF ADVERSARIAL DISTRIBUTION ---
             # Numerical safety
+            probs = torch.softmax(adversarial_logits, dim=-1)
             log_probs = (probs + 1e-12).log()
             entropy_total = -(probs * log_probs).sum()  # sum over all prefixes+vocab
 
@@ -422,7 +418,6 @@ def train(gpu_id, num_gpus):
                 avg_max_p = max_p_per_prefix.mean()
 
                 H_norm_det = H_norm.detach()
-                peaked_index = 1.0 - H_norm_det # 0 = flat, 1 = delta
 
             # 4. BACKPROPAGATION
             attack_loss.backward()
@@ -430,6 +425,7 @@ def train(gpu_id, num_gpus):
             # 5. GRADIENT AGGREGATION AND OPTIMIZER STEP
             dist.all_reduce(adversarial_logits.grad, op=dist.ReduceOp.SUM)
             adversarial_logits.grad /= num_gpus
+            adversarial_grad = adversarial_logits.grad.clone()
             optimizer.step()
             optimizer.zero_grad()
 
@@ -455,7 +451,7 @@ def train(gpu_id, num_gpus):
                         "loss": f"{attack_loss.item():.3f}",
                         "nll":  f"{nll_loss.item():.3f}",
                         "Hn":   f"{H_norm_det.item():.2f}",
-                        "Pk":   f"{peaked_index.item():.2f}",
+                        "norm":   f"{torch.norm(adversarial_grad, dim=-1).mean().item():.2e}",
                         "pmax": f"{avg_max_p.item():.2f}",
                         "T":    f"{T_t:.2f}",
                     })
@@ -476,7 +472,7 @@ def train(gpu_id, num_gpus):
         torch.save(adversarial_logits.detach().cpu(), opt_path)
         print(f"Saved optimized logits to {opt_path}")
 
-        probs = torch.softmax(adversarial_logits.detach().cpu(), dim=-1).numpy()
+        probs = torch.softmax(adversarial_logits.detach().cpu(), dim=-1)
         num_prefixes, vocab_size = probs.shape
 
         # Factorize vocabulary size into near-square dimensions
