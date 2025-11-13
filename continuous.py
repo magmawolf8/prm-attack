@@ -244,7 +244,7 @@ def save_loss_curve(loss_list, out_png, out_csv):
     losses = np.array(loss_list, dtype=np.float32)  # shape: [steps, metrics]
 
     # Save CSV with header
-    header = "total_loss,nll_pos,nll_neg,margin,entropy_penalty"
+    header = "total_loss,nll_pos,nll_neg,margin,lambda,entropy_penalty"
     np.savetxt(out_csv, losses, delimiter=",", header=header, comments="")
 
     steps = np.arange(1, len(losses) + 1)
@@ -254,7 +254,8 @@ def save_loss_curve(loss_list, out_png, out_csv):
         "nll_pos": losses[:, 1],
         "nll_neg": losses[:, 2],
         "margin": losses[:, 3],
-        "Hpenalty": losses[:, 4],
+        "lambda": losses[:, 4],
+        "Hpenalty": losses[:, 5],
     }
 
     # Helper: moving average with window 10 (or smaller if fewer points)
@@ -364,9 +365,16 @@ def train(gpu_id, num_gpus):
             f"ATTACK_OBJECTIVE must be 'flatten' or 'invert', got '{cfg.ATTACK_OBJECTIVE}'"
         )
 
+    min_lambda = getattr(cfg, "MIN_LAMBDA", 0.0)
+    max_lambda = getattr(cfg, "MAX_LAMBDA", min_lambda)
+
     def get_temperature(step_idx: int) -> float:
         alpha = min(1.0, step_idx / total_steps)
         return (T_MAX ** (1.0 - alpha)) * (T_MIN ** alpha)
+
+    def get_entropy_lambda(step_idx: int) -> float:
+        alpha = min(1.0, step_idx / total_steps)
+        return (max_lambda - min_lambda) * alpha + min_lambda
 
     global_step = 0
 
@@ -472,14 +480,16 @@ def train(gpu_id, num_gpus):
 
             nll_pos = -torch.log(pos_probs).mean()
             nll_neg = -torch.log(neg_probs).mean()
-            margin = nll_neg - nll_pos
+            margin = nll_pos - nll_neg
 
             if attack_objective == "flatten":
                 discrim_loss = margin.pow(2)
             elif attack_objective == "invert":
-                discrim_loss = margin
+                discrim_loss = -margin
             else:
                 raise ValueError(f"Unsupported ATTACK_OBJECTIVE '{cfg.ATTACK_OBJECTIVE}'")
+
+            lambda_t = get_entropy_lambda(global_step)
 
             # --- ENTROPY OF ADVERSARIAL DISTRIBUTION ---
             # Numerical safety
@@ -491,7 +501,7 @@ def train(gpu_id, num_gpus):
             H_mean = entropy_total / NUM_PREFIXES
             H_norm = H_mean / math.log(vocabulary_size) # normalized
 
-            H_penalty = REG_LAMBDA * entropy_total
+            H_penalty = lambda_t * entropy_total
 
             attack_loss = discrim_loss + H_penalty
 
@@ -519,10 +529,11 @@ def train(gpu_id, num_gpus):
                 pos_tensor = nll_pos.detach()
                 neg_tensor = nll_neg.detach()
                 margin_tensor = margin.detach()
+                lambda_tensor = torch.tensor(lambda_t, device=gpu_id)
                 H_tensor = H_penalty.detach()
 
                 # Average across GPUs
-                for t in (loss_tensor, disc_tensor, pos_tensor, neg_tensor, margin_tensor, H_tensor):
+                for t in (loss_tensor, disc_tensor, pos_tensor, neg_tensor, margin_tensor, lambda_tensor, H_tensor):
                     dist.all_reduce(t, op=dist.ReduceOp.SUM)
                     t /= num_gpus
 
@@ -532,6 +543,7 @@ def train(gpu_id, num_gpus):
                         float(pos_tensor.item()),    # nll_pos
                         float(neg_tensor.item()),    # nll_neg
                         float(margin_tensor.item()), # margin
+                        float(lambda_tensor.item()), # lambda value
                         float(H_tensor.item()),      # entropy penalty
                     ))
                     progress_bar.update(BATCH_SIZE * num_gpus)
@@ -542,6 +554,7 @@ def train(gpu_id, num_gpus):
                         "neg":  f"{neg_tensor.item():.3f}",
                         "mar":  f"{margin_tensor.item():.3f}",
                         "Hn":   f"{H_norm_det.item():.2f}",
+                        "lam":  f"{lambda_t:.2e}",
                         "norm":   f"{torch.norm(adversarial_grad, dim=-1).mean().item():.2e}",
                         "pmax": f"{avg_max_p.item():.2f}",
                         "T":    f"{T_t:.2f}",

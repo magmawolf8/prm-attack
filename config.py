@@ -21,11 +21,12 @@ DATA_SUBSET_SIZE = 1
 BATCH_SIZE = 1
 
 # Optimizer behavior
-LEARNING_RATE = 1.0
-#REG_LAMBDA = 1e-2
-REG_LAMBDA = 0
+LEARNING_RATE = 1
+# Entropy regularization schedule
+MIN_LAMBDA = 0.0
+MAX_LAMBDA = 1e-2
 T_MAX = 1.0
-T_MIN = 0.5
+T_MIN = 1.0
 
 #********************************
 #        Discrete hyperparameters
