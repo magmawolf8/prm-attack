@@ -21,7 +21,7 @@ from datetime import datetime
 
 # local configuration
 import config as cfg
-
+  # <-- ADDED
 # third-party imports
 import matplotlib
 import numpy as np
@@ -392,7 +392,7 @@ def train(gpu_id, num_gpus):
         print(f"Data loader warmup took {(end_time - start_time):.1f} seconds")
 
     # SETUP
-    skywork_tokenizer_api = SkyworkTokenizer(
+    skywork_tokenizer = SkyworkTokenizer(
         cfg.SKYWORK_MODEL_NAME, cfg.STEP_TOKEN
     )
     reward_model = PRM_MODEL.from_pretrained(cfg.SKYWORK_MODEL_NAME).to(gpu_id).eval()
@@ -446,7 +446,7 @@ def train(gpu_id, num_gpus):
 
         for batch_questions, batch_answers in data_loader:
             # PREPARE DATA
-            tokenized_batch = skywork_tokenizer_api.prepare_steps(
+            tokenized_batch = skywork_tokenizer.prepare_steps(
                 batch_questions, batch_answers
             )
             batch_embeddings = token_embedding_layer[tokenized_batch.data["input_ids"]]
@@ -481,7 +481,7 @@ def train(gpu_id, num_gpus):
             reward_values = model_output[2][tokenized_batch.data["reward_flags"].bool()]
             mean_reward = reward_values.mean()
 
-            # negative log reward (NLR) objective
+            # negative log reward objective
             nlr_loss = -torch.log(reward_values).mean()
 
             # calculate entropy
