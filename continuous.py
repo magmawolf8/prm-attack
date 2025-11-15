@@ -405,7 +405,7 @@ def train(gpu_id, num_gpus):
         "If $n=8$, then the remainder of dividing 6 by 8 is 6, and the remainder of dividing 8 by 8 is 0, so 68 is not divisible by 8.", 
         "If $n=9$, then the remainder of dividing 6 by 9 is 6, and the remainder of dividing 9 by 9 is 0, so 69 is not divisible by 9.", 
         "So the only values of $n$ that make 6n divisible by $n$ are 1, 2, 3, and 6.", "# Answer\n\n4"]
-    neg_answers = ["".join([str(random.randint(0, 9)) if c in nums and random.random() > 0.75 else c for c in step]) for step in neg_answers]
+    neg_answers = ["".join([str(random.randint(0, 9)) if c in nums and random.random() > 0.5 else c for c in step]) for step in neg_answers]
 
     # --- TRAINING EPOCHS ---
     for epoch in range(NUM_EPOCHS):
