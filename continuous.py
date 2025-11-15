@@ -44,7 +44,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 class PRM800k(Dataset):
     """
-    A custom PyTorch Dataset class to load the PRM800k dataset from a local .jsonl file.
+    A Dataset to load the PRM800k dataset from a local .jsonl file.
     """
     def __init__(self, jsonl_path, size):
         self.samples = []
@@ -360,7 +360,7 @@ def train(gpu_id, num_gpus):
     vocabulary_size = token_embedding_layer.shape[0]
 
     adversarial_logits = torch.nn.Parameter(
-        torch.zeros(NUM_PREFIXES, vocabulary_size, device=gpu_id)
+        torch.randn(NUM_PREFIXES, vocabulary_size, device=gpu_id)
     )
 
     if gpu_id == 0:

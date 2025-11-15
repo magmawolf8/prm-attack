@@ -6,7 +6,7 @@ RANDOM_SEED = 420
 #      Continuous hyperparameters
 #********************************
 # General hyperparameters
-NUM_PREFIXES = 10
+NUM_PREFIXES = 30
 
 # Training time hyperparameters
 NUM_EPOCHS = 200
