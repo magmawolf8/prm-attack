@@ -39,7 +39,7 @@ import numpy as np
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 #********************************
-#                         Dataset
+#                 Custom Datasets
 #********************************
 
 class PRM800k(Dataset):
@@ -65,6 +65,22 @@ class PRM800k(Dataset):
     def __getitem__(self, idx):
         question, answer = self.samples[idx]
         return question, answer
+
+class SingleQADataset(Dataset):
+    """
+    Fake Dataset which always returns the same question and answer.
+    """
+    def __init__(self, question, answer_steps, size=1):
+        self.question = question
+        self.answer_steps = answer_steps
+        self.size = size
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, idx):
+        # idx is ignored; always return same (question, answer)
+        return self.question, self.answer_steps
 
 #********************************
 #         Gradient sign optimizer
@@ -110,7 +126,9 @@ torch.manual_seed(RANDOM_SEED)
 random.seed(RANDOM_SEED)
 torch.cuda.manual_seed_all(RANDOM_SEED)
 
-# --- HELPER FUNCTIONS ---
+#********************************
+#                Helper Functions
+#********************************
 
 def insert_adversarial_prefix(tokenized_batch, batch_embeddings, adversarial_prefix):
     """
@@ -182,7 +200,9 @@ def collate_into_batch(samples_list):
     questions, answers = zip(*samples_list)
     return list(questions), list(answers)
 
-# --- LOGGING / PLOTTING UTILS ---
+#********************************
+#               Logging Utilities
+#********************************
 
 def save_loss_curve(loss_list, out_png, out_csv):
     losses = np.array(loss_list, dtype=np.float32)  # shape: [steps, 3]
@@ -282,7 +302,7 @@ def save_loss_curve(loss_list, out_png, out_csv):
 
 
 #********************************
-#             Main training loop
+#              Main training loop
 #********************************
 
 def train(gpu_id, num_gpus):
@@ -293,16 +313,29 @@ def train(gpu_id, num_gpus):
         print(f"Outputs will be saved under: {os.path.abspath(RUN_DIR)}")
 
     # --- DATA LOADING ---
-    prm800k_dataset = PRM800k("phase2_train.jsonl", DATA_SUBSET_SIZE)
+    #prm800k_dataset = PRM800k("phase2_train.jsonl", DATA_SUBSET_SIZE)
+    data = SingleQADataset(
+        question="Find the sum of all integer bases $b>9$ for which $17_{b}$ is a divisor of $97_{b}$.",
+        answer_steps=[
+            "To determine the total weight of all Cindy's books, we need to calculate the weight of each book individually and then sum these weights.", 
+            "First, for the math and science books:\n- Each math book weighs 2 pounds.\n- Each science book weighs 2 pounds.\n- Cindy has 2 math books and 2 science books.\n- Total weight of math books: \\(2 \\text{ books} \\times 2 \\text{ pounds/book} = 4 \\text{ pounds}\\).\n- Total weight of science books: \\(2 \\text{ books} \\times 2 \\text{ pounds/book} = 4 \\text{ pounds}\\).\n- Combined weight of math and science books: \\(4 \\text{ pounds} + 4 \\text{ pounds} = 8 \\text{ pounds}\\).", 
+            "Second, for the French book:\n- The French book weighs 4 pounds.",
+            "Third, for the English book:\n- The English book weighs 3 pounds.", 
+            "Fourth, for the history book:\n- The history book weighs twice as much as the English book.\n- Weight of the history book: \\(2 \\times 3 \\text{ pounds} = 6 \\text{ pounds}\\).",
+            "Finally, for the total weight:\n- Sum of the weights of all the books: \\[ 8 \\text{ pounds} \\text{ (math and science)} + 4 \\text{ pounds} \\text{ (French)} + 3 \\text{ pounds} \\text{ (English)} + 6 \\text{ pounds} \\text{ (history)} = 21 \\text{ pounds} \\]",
+            "Therefore, the total weight of the books Cindy is carrying is \\(\\boxed{21}\\) pounds."
+        ],
+        size=BATCH_SIZE
+    )
 
     sampler = DistributedSampler(
-        prm800k_dataset,
+        data,
         num_replicas=num_gpus,
         rank=gpu_id,
         shuffle=True
     )
     data_loader = DataLoader(
-        prm800k_dataset,
+        data,
         batch_size=BATCH_SIZE,
         sampler=sampler,
         shuffle=False,
@@ -318,7 +351,7 @@ def train(gpu_id, num_gpus):
         end_time = time.perf_counter()
         print(f"Data loader warmup took {(end_time - start_time):.1f} seconds")
 
-    # --- MODEL AND OPTIMIZER SETUP ---
+    # SETUP
     skywork_tokenizer_api = SkyworkTokenizerAPI(
         SKYWORK_MODEL_NAME, STEP_TOKEN
     )
@@ -329,86 +362,75 @@ def train(gpu_id, num_gpus):
     adversarial_logits = torch.nn.Parameter(
         torch.zeros(NUM_PREFIXES, vocabulary_size, device=gpu_id)
     )
-    #adversarial_logits = torch.nn.Parameter(
-    #    0.1*torch.randn(NUM_PREFIXES, vocabulary_size, device=gpu_id)
-    #)
 
-    # Save initial prefix (rank 0) for similarity / distance after training
     if gpu_id == 0:
         initial_logits_cpu = adversarial_logits.detach().cpu().clone()
 
     optimizer = torch.optim.Adam([adversarial_logits], lr=LEARNING_RATE, maximize=False)
+    # Per-step loss history
+    loss_history = []
 
     if gpu_id == 0:
         print("Starting training...")
 
-    # Per-step loss history (rank 0)
-    loss_history = []
-
-    steps_per_epoch = math.ceil(len(prm800k_dataset) / (BATCH_SIZE * num_gpus))
+    steps_per_epoch = math.ceil(len(data) / (BATCH_SIZE * num_gpus))
     total_steps = max(1, steps_per_epoch * NUM_EPOCHS)
 
-    def get_temperature(step_idx: int) -> float:
-        alpha = min(1.0, step_idx / total_steps)
-        return (T_MAX ** (1.0 - alpha)) * (T_MIN ** alpha)
+    def get_lambda(step_idx: int) -> float:
+        t = min(1.0, step_idx / total_steps)
+        cos_t = 0.5 * (1 - math.cos(math.pi * t))
+        return (1 - cos_t) * MIN_LAMBDA + cos_t * MAX_LAMBDA
 
     global_step = 0
 
-    # --- TRAINING EPOCHS ---
     for epoch in range(NUM_EPOCHS):
         if gpu_id == 0:
             progress_bar = tqdm(
-                total=len(prm800k_dataset),
+                total=len(data),
                 desc=f"Epoch {epoch+1}/{NUM_EPOCHS}"
             )
         sampler.set_epoch(epoch)
 
         for batch_questions, batch_answers in data_loader:
-            #print(batch_questions, "\n\n\n", batch_answers)
-            #batch_questions = ["A right cylindrical oil tank is $15$ feet tall and its circular bases have diameters of $4$ feet each. When the tank is lying flat on its side (not on one of the circular ends), the oil inside is $3$ feet deep. How deep, in feet, would the oil have been if the tank had been standing upright on one of its bases? Express your answer as a decimal to the nearest tenth."]
-            #batch_answers = [['I need to find the volume of the oil in the tank and then divide it by the area of the base to get the height of the oil when the tank is upright.', 'To find the volume of the oil, I can think of it as a segment of a cylinder, where the central angle of the segment is determined by the depth of the oil.', 'If I draw a right triangle inside the tank, where the hypotenuse is the diameter of the base, the adjacent side is the depth of the oil, and the opposite side is half the length of the chord that cuts the oil segment, I can use trigonometry to find the central angle.', 'The diameter of the base is $4$ feet, so the hypotenuse of the triangle is $4$ feet. The depth of the oil is $3$ feet, so the adjacent side is $3$ feet. Using the Pythagorean theorem, I can find the opposite side as $\\sqrt{4^2 - 3^2} = \\sqrt{7}$ feet.', 'Using the cosine function, I can find the central angle as $\\cos^{-1}(\\frac{3}{4}) \\approx 0.7227$ radians.', 'The length of the chord that cuts the oil segment is twice the opposite side, so it is $2\\sqrt{7}$ feet. The radius of the base is half the diameter, so it is $2$ feet.', 'Using the formula for the area of a circular segment, I can find the area of the oil segment as $A = \\frac{1}{2}r^2(\\theta - \\sin \\theta) \\approx 2.6766$ square feet.', 'The length of the tank is $15$ feet, so the volume of the oil segment is $V = A \\cdot 15 \\approx 40.1491$ cubic feet.', 'The area of the base is $\\pi r^2 = 4\\pi$ square feet.', 'The height of the oil when the tank is upright is $h = \\frac{V}{A} \\approx 3.1797$ feet.', 'Rounding to the nearest tenth, the answer is $3.2$ feet.', '# Answer\n\n3.2']]
-            # 1. PREPARE DATA
+            # PREPARE DATA
             tokenized_batch = skywork_tokenizer_api.prepare_steps(batch_questions, batch_answers)
             batch_embeddings = token_embedding_layer[tokenized_batch.data["input_ids"]]
 
-            T_t = get_temperature(global_step)
-            one_hot = F.gumbel_softmax(adversarial_logits, tau=T_t, hard=True, dim=-1)
-            #one_hot = torch.softmax(adversarial_logits, dim=-1) # fake news---this isn't one-hot, just for debugging purposes
+            # MAKE MAGIC TOKENS
+            one_hot = F.gumbel_softmax(adversarial_logits, tau=TAU, hard=False, dim=-1)
             adversarial_prefix = one_hot @ token_embedding_layer
 
+            # INSERT MAGIC TOKENS
             prefixed_embeddings, prefixed_mask, prefixed_ans_flag, prefixed_reward_flag = insert_adversarial_prefix(
                 tokenized_batch, batch_embeddings, adversarial_prefix
             )
-
             tokenized_batch.data["attention_mask"] = prefixed_mask
             tokenized_batch.data["answer_flag"] = prefixed_ans_flag
             tokenized_batch.data["reward_flags"] = prefixed_reward_flag
             tokenized_batch.pop("input_ids") # don't use these anymore
             tokenized_batch = tokenized_batch.to(gpu_id)
 
-            # 2. FORWARD PASS
+            # FORWARD PASS
             model_output = reward_model(
                 **tokenized_batch,
                 inputs_embeds=prefixed_embeddings,
                 return_probs=True,
             )
 
-            # 3. CALCULATE LOSS
+            # CALCULATE LOSS
             nll_loss = -torch.log(
                 model_output[2][tokenized_batch.data["reward_flags"].bool()]
             ).mean()
 
-            # --- ENTROPY OF ADVERSARIAL DISTRIBUTION ---
-            # Numerical safety
+            # CALCULATE ENTROPY
             probs = torch.softmax(adversarial_logits, dim=-1)
             log_probs = (probs + 1e-12).log()
-            entropy_total = -(probs * log_probs).sum()  # sum over all prefixes+vocab
+            entropy_total = -(probs * log_probs).sum()
 
-            # Normalized entropy averaged across prefixes
             H_mean = entropy_total / NUM_PREFIXES
-            H_norm = H_mean / math.log(vocabulary_size) # normalized
-
-            H_penalty = REG_LAMBDA * entropy_total
+            H_norm = H_mean / math.log(vocabulary_size)
+            lambda_t = get_lambda(global_step)
+            H_penalty = lambda_t * H_mean
 
             attack_loss = nll_loss + H_penalty
 
@@ -419,17 +441,17 @@ def train(gpu_id, num_gpus):
 
                 H_norm_det = H_norm.detach()
 
-            # 4. BACKPROPAGATION
+            # BACKPROPAGATION
             attack_loss.backward()
 
-            # 5. GRADIENT AGGREGATION AND OPTIMIZER STEP
+            # GRADIENT AGGREGATION AND OPTIMIZER STEP
             dist.all_reduce(adversarial_logits.grad, op=dist.ReduceOp.SUM)
             adversarial_logits.grad /= num_gpus
             adversarial_grad = adversarial_logits.grad.clone()
             optimizer.step()
             optimizer.zero_grad()
 
-            # 6. LOGGING
+            # LOGGING
             with torch.no_grad():
                 loss_tensor = attack_loss.detach()
                 nll_tensor = nll_loss.detach()
@@ -442,9 +464,9 @@ def train(gpu_id, num_gpus):
 
                 if gpu_id == 0:
                     loss_history.append((
-                        float(loss_tensor.item()),  # total loss
-                        float(nll_tensor.item()),   # NLL
-                        float(H_tensor.item()),     # entropy penalty
+                        float(loss_tensor.item()),
+                        float(nll_tensor.item()),
+                        float(H_tensor.item()),
                     ))
                     progress_bar.update(BATCH_SIZE * num_gpus)
                     progress_bar.set_postfix({
@@ -453,7 +475,6 @@ def train(gpu_id, num_gpus):
                         "Hn":   f"{H_norm_det.item():.2f}",
                         "norm":   f"{torch.norm(adversarial_grad, dim=-1).mean().item():.2e}",
                         "pmax": f"{avg_max_p.item():.2f}",
-                        "T":    f"{T_t:.2f}",
                     })
             
             global_step += 1
@@ -461,10 +482,10 @@ def train(gpu_id, num_gpus):
         if gpu_id == 0:
             progress_bar.close()
 
-    # --- SAVE & REPORT (rank 0) ---
+
     dist.barrier()
+    # SAVE AND REPORT
     if gpu_id == 0:
-        # Save optimized prefix
         opt_path = os.path.join(
             RUN_DIR,
             f"optimized_logits.pt"

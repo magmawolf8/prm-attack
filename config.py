@@ -6,19 +6,19 @@ RANDOM_SEED = 420
 #      Continuous hyperparameters
 #********************************
 # General hyperparameters
-NUM_PREFIXES = 30
+NUM_PREFIXES = 10
 
 # Training time hyperparameters
-NUM_EPOCHS = 3
-DATA_SUBSET_SIZE = 2000
+NUM_EPOCHS = 200
+DATA_SUBSET_SIZE = 1
 BATCH_SIZE = 1
 
 # Optimizer behavior
-LEARNING_RATE = 1
-REG_LAMBDA = 1e-2
-#REG_LAMBDA = 0
-T_MAX = 3.0
-T_MIN = 1.0
+LEARNING_RATE = 0.5
+# Entropy regularization schedule
+MIN_LAMBDA = 0.001
+MAX_LAMBDA = 0.1
+TAU = 0.5
 
 #********************************
 #        Discrete hyperparameters
