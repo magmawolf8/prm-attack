@@ -13,7 +13,7 @@ import torch
 
 
 
-class SkyworkTokenizerAPI:
+class SkyworkTokenizer:
     def __init__(self, model_name: str, default_step_token):
         self._tokenizer = AutoTokenizer.from_pretrained(
             model_name,
@@ -28,7 +28,7 @@ class SkyworkTokenizerAPI:
             questions = [questions]
             batch_answers_steps = [batch_answers_steps]
         
-        SkyworkTokenizerAPI._check_validity(questions, batch_answers_steps)
+        SkyworkTokenizer._check_validity(questions, batch_answers_steps)
         
         batch_input_ids = list()
         batch_answer_index = list()
