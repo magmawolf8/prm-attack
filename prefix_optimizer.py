@@ -124,84 +124,6 @@ torch.cuda.manual_seed_all(cfg.RANDOM_SEED)
 # helper functions
 # ===============================
 
-def insert_adversarial_prefix(tokenized_batch, batch_embeddings, adversarial_prefix):
-    """Insert adversarial prefix embeddings at the start and end of the answer.
-
-    The prefix is inserted twice: once at the start of the answer span and
-    once right before the final reward-flagged token. All associated masks
-    (answer_flag, reward_flags, attention_mask) are grown accordingly.
-    """
-    prefix_length = adversarial_prefix.shape[0]
-    batch_size = batch_embeddings.shape[0]
-    device = batch_embeddings.device
-
-    zeros_for_prefix = torch.zeros(prefix_length, dtype=torch.long, device=device)
-
-    processed_embeddings_list = []
-    processed_answer_flags_list = []
-    processed_reward_flags_list = []
-
-    for i in range(batch_size):
-        sample_embedding = batch_embeddings[i]
-
-        answer_flag_vector = tokenized_batch.data["answer_flag"][i].to(device)
-        reward_flags_vector = tokenized_batch.data["reward_flags"][i].to(device)
-
-        start_insertion_idx = torch.nonzero(answer_flag_vector, as_tuple=True)[0][0]
-        end_insertion_idx = torch.nonzero(reward_flags_vector, as_tuple=True)[0][-1]
-
-        new_embedding = torch.vstack(
-            (
-                sample_embedding[:start_insertion_idx],
-                adversarial_prefix,
-                sample_embedding[start_insertion_idx:end_insertion_idx],
-                adversarial_prefix,
-                sample_embedding[end_insertion_idx:],
-            )
-        )
-        processed_embeddings_list.append(new_embedding)
-
-        new_answer_flag = torch.cat(
-            (
-                answer_flag_vector[:start_insertion_idx],
-                zeros_for_prefix,
-                answer_flag_vector[start_insertion_idx:end_insertion_idx],
-                zeros_for_prefix,
-                answer_flag_vector[end_insertion_idx:],
-            )
-        )
-        processed_answer_flags_list.append(new_answer_flag)
-
-        new_reward_flag = torch.cat(
-            (
-                reward_flags_vector[:start_insertion_idx],
-                zeros_for_prefix,
-                reward_flags_vector[start_insertion_idx:end_insertion_idx],
-                zeros_for_prefix,
-                reward_flags_vector[end_insertion_idx:],
-            )
-        )
-        processed_reward_flags_list.append(new_reward_flag)
-
-    prefixed_batch_embeddings = torch.stack(processed_embeddings_list)
-    prefixed_answer_flag = torch.stack(processed_answer_flags_list)
-    prefixed_reward_flags = torch.stack(processed_reward_flags_list)
-
-    total_added_length = 2 * prefix_length
-    prefixed_attention_mask = F.pad(
-        input=tokenized_batch.data["attention_mask"],
-        pad=(total_added_length, 0),
-        value=1,
-    )
-
-    return (
-        prefixed_batch_embeddings,
-        prefixed_attention_mask,
-        prefixed_answer_flag,
-        prefixed_reward_flags,
-    )
-
-
 def collate_into_batch(samples_list):
     questions, answers = zip(*samples_list)
     return list(questions), list(answers)
@@ -211,13 +133,16 @@ def collate_into_batch(samples_list):
 # training class
 # ===============================
 
-class AdversarialTrainer:
-    """Manages the state and execution of the adversarial training loop."""
+class PrefixOptimizer:
+    """
+    Manages the core computation for adversarial prefix optimization.
+    This class contains NO logging, I/O, or other side effects.
+    """
 
     def __init__(self,
+                 dataset: Dataset,
                  gpu_id: int,
                  num_gpus: int,
-                 dataset: Dataset,
                  hparams: cfg.Hyperparameters):
         
         self.gpu_id = gpu_id
@@ -225,10 +150,7 @@ class AdversarialTrainer:
         self.data = dataset
         self.hparams = hparams
         
-        self.noisy = (gpu_id == 0)
-        
-        # State variables
-        self.run_dir = ""
+        # Core state variables
         self.sampler = None
         self.data_loader = None
         self.skywork_tokenizer = None
@@ -236,26 +158,15 @@ class AdversarialTrainer:
         self.token_embedding_layer = None
         self.vocabulary_size = 0
         self.adversarial_logits = None
-        self.initial_logits_cpu = None
         self.optimizer = None
-        self.metrics_series = []
         self.steps_per_epoch = 0
         self.total_steps = 0
         self.global_step = 0
-        self.progress_bar = None
 
         # Setup
-        self._setup_output_dir()
         self._setup_data()
         self._setup_model_and_opt()
         self._setup_schedule()
-
-    def _setup_output_dir(self):
-        """Creates the unique output directory for this run."""
-        if self.noisy:
-            self.run_dir = f"adv_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            os.makedirs(self.run_dir, exist_ok=True)
-            print(f"Outputs will be saved under: {os.path.abspath(self.run_dir)}")
 
     def _setup_data(self):
         """Initializes the Sampler and DataLoader from the provided Dataset."""
@@ -281,13 +192,6 @@ class AdversarialTrainer:
             collate_fn=collate_into_batch,
         )
 
-        if self.noisy:
-            print("Warming up data loader...")
-            start_time = time.perf_counter()
-            _ = next(iter(self.data_loader))
-            end_time = time.perf_counter()
-            print(f"Data loader warmup took {(end_time - start_time):.1f} seconds")
-
     def _setup_model_and_opt(self):
         """Loads the model, tokenizer, and creates optimizer and logits."""
         self.skywork_tokenizer = SkyworkTokenizer(
@@ -304,15 +208,12 @@ class AdversarialTrainer:
             torch.randn(self.hparams.NUM_PREFIXES, self.vocabulary_size, device=self.gpu_id)
         )
 
-        if self.noisy:
-            self.initial_logits_cpu = self.adversarial_logits.detach().cpu().clone()
-
         self.optimizer = torch.optim.Adam(
             [self.adversarial_logits], lr=self.hparams.LEARNING_RATE, maximize=False
         )
 
     def _setup_schedule(self):
-        """Sets up step counts and metric tracking."""
+        """Sets up step counts."""
         if self.hparams.FULL_BATCH:
             self.steps_per_epoch = 1
         else:
@@ -321,7 +222,6 @@ class AdversarialTrainer:
             )
         
         self.total_steps = max(1, self.steps_per_epoch * self.hparams.NUM_EPOCHS)
-        self.metrics_series = []
         self.global_step = 0
 
     def _get_lambda(self) -> float:
@@ -330,41 +230,34 @@ class AdversarialTrainer:
         cos_t = 0.5 * (1 - math.cos(math.pi * t))
         return (1 - cos_t) * self.hparams.MIN_LAMBDA + cos_t * self.hparams.MAX_LAMBDA
 
-    def run(self):
-        """Runs the main training loop."""
-        if self.noisy:
-            print("Starting training...")
-            if self.hparams.FULL_BATCH:
-                self.progress_bar = tqdm(
-                    total=self.hparams.NUM_EPOCHS,
-                    desc="Full-batch optimization",
-                )
+    # hooks
+    def on_train_start(self): pass
+    def on_epoch_start(self, epoch: int): pass
+    def on_epoch_end(self, epoch: int): pass
+    def on_train_end(self, final_logits: torch.Tensor): pass
+    
+    def run(self) -> torch.Tensor:
+        """
+        Runs the main training loop and returns the optimized logits.
+        """
+        self.on_train_start()
 
         for epoch in range(self.hparams.NUM_EPOCHS):
-            self._run_epoch(epoch)
+            self.on_epoch_start(epoch)
+            self.sampler.set_epoch(epoch) # DDP requirement
+            
+            for batch in self.data_loader:
+                self.run_step(batch)
+            
+            self.on_epoch_end(epoch)
 
-        self._cleanup_and_save()
-
-    def _run_epoch(self, epoch: int):
-        """Runs one epoch of training."""
-        if self.noisy and not self.hparams.FULL_BATCH:
-            self.progress_bar = tqdm(
-                total=len(self.data),
-                desc=f"Epoch {epoch + 1}/{self.hparams.NUM_EPOCHS}",
-            )
+        dist.barrier()
+        final_logits_cpu = self.adversarial_logits.detach().cpu()
+        self.on_train_end(final_logits_cpu)
         
-        self.sampler.set_epoch(epoch)
+        return final_logits_cpu
 
-        for batch in self.data_loader:
-            self._run_step(batch)
-        
-        if self.noisy:
-            if self.hparams.FULL_BATCH:
-                self.progress_bar.update(1)
-            else:
-                self.progress_bar.close()
-
-    def _run_step(self, batch):
+    def run_step(self, batch):
         """Runs one optimization step."""
         batch_questions, batch_answers = batch
 
@@ -373,32 +266,29 @@ class AdversarialTrainer:
             batch_questions, batch_answers
         )
         batch_embeddings = self.token_embedding_layer[tokenized_batch.data["input_ids"]]
+        tokenized_batch.pop("input_ids")
 
-        # MAKE MAGIC TOKENS
-        one_hot = F.gumbel_softmax(
-            self.adversarial_logits, tau=self.hparams.TAU, hard=False, dim=-1
-        )
-        adversarial_prefix = one_hot @ self.token_embedding_layer
+        # MAKE MAGIC TOKENS (soft)
+        adversarial_prefix = self._make_adversarial_prefix(hard=False)
 
         # INSERT MAGIC TOKENS
         (
-            prefixed_embeddings,
+            prefixed_embeds,
             prefixed_mask,
             prefixed_ans_flag,
             prefixed_reward_flag,
-        ) = insert_adversarial_prefix(
+        ) = self._insert_adversarial_prefix(
             tokenized_batch, batch_embeddings, adversarial_prefix
         )
+        tokenized_batch.data["inputs_embeds"] = prefixed_embeds
         tokenized_batch.data["attention_mask"] = prefixed_mask
         tokenized_batch.data["answer_flag"] = prefixed_ans_flag
         tokenized_batch.data["reward_flags"] = prefixed_reward_flag
-        tokenized_batch.pop("input_ids")
         tokenized_batch = tokenized_batch.to(self.gpu_id)
 
         # FORWARD PASS
         model_output = self.reward_model(
             **tokenized_batch,
-            inputs_embeds=prefixed_embeddings,
             return_probs=True,
         )
 
@@ -419,31 +309,97 @@ class AdversarialTrainer:
 
         attack_loss = nlr_loss + H_penalty
 
-        # METRICS FOR LOGGING (pre-backward)
-        with torch.no_grad():
-            max_p_per_prefix = probs.max(dim=-1).values
-            avg_max_p = max_p_per_prefix.mean()
-            H_norm_det = H_norm.detach()
-
         # BACKPROPAGATION
         attack_loss.backward()
 
-        # OPTIMIZER STEP (DDP-aware)
-        grad_norm = self._optimizer_step()
-
-        # LOGGING
-        self._log_metrics(
-            attack_loss=attack_loss.detach(),
-            nlr_loss=nlr_loss.detach(),
-            H_penalty=H_penalty.detach(),
-            # Other metrics
-            mean_reward=mean_reward.detach(),
-            H_norm=H_norm_det,
-            avg_max_p=avg_max_p,
-            grad_norm=grad_norm
-        )
-        
+        # OPTIMIZER STEP
+        self._optimizer_step()
+ 
         self.global_step += 1
+    
+    def _make_adversarial_prefix(self, hard: bool) -> torch.Tensor:
+        if hard:
+            probs = F.one_hot(
+                torch.argmax(self.adversarial_logits, dim=-1),
+                num_classes=self.vocabulary_size
+            ).float()
+        else:
+            probs = F.gumbel_softmax(
+                self.adversarial_logits, tau=self.hparams.TAU, hard=False, dim=-1
+            )
+        return probs @ self.token_embedding_layer
+
+    @staticmethod
+    def _insert_adversarial_prefix(tokenized_batch, batch_embeddings, adversarial_prefix):
+        prefix_length = adversarial_prefix.shape[0]
+        batch_size = batch_embeddings.shape[0]
+        device = batch_embeddings.device
+
+        zeros_for_prefix = torch.zeros(prefix_length, dtype=torch.long, device=device)
+
+        processed_embeddings_list = []
+        processed_answer_flags_list = []
+        processed_reward_flags_list = []
+
+        for i in range(batch_size):
+            sample_embedding = batch_embeddings[i]
+
+            answer_flag_vector = tokenized_batch.data["answer_flag"][i].to(device)
+            reward_flags_vector = tokenized_batch.data["reward_flags"][i].to(device)
+
+            start_insertion_idx = torch.nonzero(answer_flag_vector, as_tuple=True)[0][0]
+            end_insertion_idx = torch.nonzero(reward_flags_vector, as_tuple=True)[0][-1]
+
+            new_embedding = torch.vstack(
+                (
+                    sample_embedding[:start_insertion_idx],
+                    adversarial_prefix,
+                    sample_embedding[start_insertion_idx:end_insertion_idx],
+                    adversarial_prefix,
+                    sample_embedding[end_insertion_idx:],
+                )
+            )
+            processed_embeddings_list.append(new_embedding)
+
+            new_answer_flag = torch.cat(
+                (
+                    answer_flag_vector[:start_insertion_idx],
+                    zeros_for_prefix,
+                    answer_flag_vector[start_insertion_idx:end_insertion_idx],
+                    zeros_for_prefix,
+                    answer_flag_vector[end_insertion_idx:],
+                )
+            )
+            processed_answer_flags_list.append(new_answer_flag)
+
+            new_reward_flag = torch.cat(
+                (
+                    reward_flags_vector[:start_insertion_idx],
+                    zeros_for_prefix,
+                    reward_flags_vector[start_insertion_idx:end_insertion_idx],
+                    zeros_for_prefix,
+                    reward_flags_vector[end_insertion_idx:],
+                )
+            )
+            processed_reward_flags_list.append(new_reward_flag)
+
+        prefixed_batch_embeddings = torch.stack(processed_embeddings_list)
+        prefixed_answer_flag = torch.stack(processed_answer_flags_list)
+        prefixed_reward_flags = torch.stack(processed_reward_flags_list)
+
+        total_added_length = 2 * prefix_length
+        prefixed_attention_mask = F.pad(
+            input=tokenized_batch.data["attention_mask"],
+            pad=(total_added_length, 0),
+            value=1,
+        )
+
+        return (
+            prefixed_batch_embeddings,
+            prefixed_attention_mask,
+            prefixed_answer_flag,
+            prefixed_reward_flags,
+        )
 
     def _optimizer_step(self) -> torch.Tensor:
         """Performs gradient reduction and optimizer step."""
@@ -457,76 +413,6 @@ class AdversarialTrainer:
 
         return grad_norm
 
-    def _log_metrics(self, **kwargs):
-        """Aggregates metrics across GPUs and logs to console/history."""
-        with torch.no_grad():
-            # Collect tensors
-            tensors = [t for t in kwargs.values() if isinstance(t, torch.Tensor)]
-            
-            # Average across GPUs
-            for t in tensors:
-                dist.all_reduce(t, op=dist.ReduceOp.SUM)
-                t /= self.num_gpus
-
-            if self.noisy:
-                # Add to history
-                self.metrics_series.append(
-                    (
-                        float(kwargs['attack_loss'].item()),
-                        float(kwargs['nlr_loss'].item()),
-                        float(kwargs['H_penalty'].item()),
-                    )
-                )
-
-                # Create postfix for tqdm
-                postfix_dict = {
-                    "loss": f"{kwargs['attack_loss'].item():.3f}",
-                    "reward": f"{kwargs['mean_reward'].item():.3f}",
-                    "NLR": f"{kwargs['nlr_loss'].item():.3f}",
-                    "Hn": f"{kwargs['H_norm'].item():.2f}",
-                    "norm": f"{kwargs['grad_norm'].item():.2e}",
-                    "pmax": f"{kwargs['avg_max_p'].item():.2f}",
-                }
-                
-                if self.hparams.FULL_BATCH:
-                    self.progress_bar.set_postfix(postfix_dict)
-                else:
-                    self.progress_bar.update(self.hparams.BATCH_SIZE * self.num_gpus)
-                    self.progress_bar.set_postfix(postfix_dict)
-
-    def _cleanup_and_save(self):
-        """Waits for all processes and saves artifacts on the main process."""
-        dist.barrier()
-        if self.noisy:
-            if self.hparams.FULL_BATCH and self.progress_bar is not None:
-                self.progress_bar.close()
-            
-            self._save_artifacts()
-
-    def _save_artifacts(self):
-        """Saves all run artifacts to the run directory."""
-        print("\n--- Saving artifacts ---")
-        
-        # Save optimized logits
-        opt_path = os.path.join(self.run_dir, "optimized_logits.pt")
-        artifacts.save_logits(self.adversarial_logits.detach().cpu(), opt_path)
-
-        # Save token visualizations
-        probs = torch.softmax(self.adversarial_logits.detach().cpu(), dim=-1)
-        artifacts.save_token_visualizations(probs, self.run_dir)
-
-        # Save config
-        artifacts.save_hyperparams(self.run_dir)
-
-        # Save initial logits for comparison
-        init_path = os.path.join(self.run_dir, "initial_logits.pt")
-        artifacts.save_logits(self.initial_logits_cpu, init_path)
-
-        # Save various training metrics
-        metrics_csv = os.path.join(self.run_dir, "metrics.csv")
-        metrics_png = os.path.join(self.run_dir, "metrics.png")
-        artifacts.save_metrics(self.metrics_series, metrics_png, metrics_csv)
-        print("--- Artifact saving complete ---")
 
 
 # ===============================
@@ -556,8 +442,8 @@ def train(gpu_id, num_gpus):
     )
     
     # 3. Pass all dependencies to the trainer
-    trainer = AdversarialTrainer(data, gpu_id, num_gpus, hparams)
-    trainer.run()
+    trainer = PrefixOptimizer(data, gpu_id, num_gpus, hparams)
+    optimized_logits = trainer.run()
 
 
 def main():

@@ -17,6 +17,7 @@ import config as cfg
 # third-party imports
 import torch
 import numpy as np
+import pandas as pd
 import matplotlib
 
 # configure matplotlib before importing pyplot
@@ -43,105 +44,87 @@ def save_hyperparams(run_dir: str):
         json.dump(hparams, f, indent=2, sort_keys=True)
 
 
-def save_metrics(loss_list, out_png, out_csv):
-    """Save CSV + a panel of loss curves."""
-    losses = np.array(loss_list, dtype=np.float32)  # shape: [steps, 3]
-
-    # Save CSV with header
-    header = "total_loss,nlr_loss,entropy_penalty"
-    np.savetxt(out_csv, losses, delimiter=",", header=header, comments="")
-    print(f"Saved training loss CSV to {out_csv}")
-
-    steps = np.arange(1, len(losses) + 1)
-
-    # Helper: moving average with window 10 (or smaller if fewer points)
-    def moving_average(x, window=10):
-        window = min(window, len(x))
-        if window <= 1:
-            return x, steps  # nothing to smooth
-        weights = np.ones(window, dtype=np.float32) / window
-        ma = np.convolve(x, weights, mode="valid")
-        # Align x-axis: last element of each window
-        ma_steps = np.arange(window, len(x) + 1)
-        return ma, ma_steps
-
-    total = losses[:, 0]
-    nlr = losses[:, 1]
-    H_pen = losses[:, 2]
-
-    total_ma, total_ma_steps = moving_average(total, window=10)
-    nlr_ma, nlr_ma_steps = moving_average(nlr, window=10)
-    H_ma, H_ma_steps = moving_average(H_pen, window=10)
-
-    base, ext = os.path.splitext(out_png)
-    total_raw_png = base + "_total_raw" + ext
-    total_ma_png = base + "_total_ma10" + ext
-    nlr_raw_png = base + "_nlr_raw" + ext
-    nlr_ma_png = base + "_nlr_ma10" + ext
-    H_raw_png = base + "_Hpenalty_raw" + ext
-    H_ma_png = base + "_Hpenalty_ma10" + ext
-
-    # --- 1. Total loss (raw) ---
-    plt.figure(figsize=(8, 5))
-    plt.plot(steps, total, linewidth=1.6)
-    plt.xlabel("Optimizer step")
-    plt.ylabel("Total loss (avg across GPUs)")
-    plt.title("Total attack loss (raw)")
-    plt.tight_layout()
-    plt.savefig(total_raw_png, dpi=150)
-    plt.close()
-
-    # --- 2. Total loss (10-step moving average) ---
-    plt.figure(figsize=(8, 5))
-    plt.plot(total_ma_steps, total_ma, linewidth=1.6)
-    plt.xlabel("Optimizer step")
-    plt.ylabel("Total loss (10-step MA)")
-    plt.title("Total attack loss (10-step moving average)")
-    plt.tight_layout()
-    plt.savefig(total_ma_png, dpi=150)
-    plt.close()
-
-    # --- 3. NLR (raw) ---
-    plt.figure(figsize=(8, 5))
-    plt.plot(steps, nlr, linewidth=1.6)
-    plt.xlabel("Optimizer step")
-    plt.ylabel("NLR (avg across GPUs)")
-    plt.title("Negative log reward (raw)")
-    plt.tight_layout()
-    plt.savefig(nlr_raw_png, dpi=150)
-    plt.close()
-
-    # --- 4. NLR (10-step moving average) ---
-    plt.figure(figsize=(8, 5))
-    plt.plot(nlr_ma_steps, nlr_ma, linewidth=1.6)
-    plt.xlabel("Optimizer step")
-    plt.ylabel("NLR (10-step MA)")
-    plt.title("Negative log reward (10-step moving average)")
-    plt.tight_layout()
-    plt.savefig(nlr_ma_png, dpi=150)
-    plt.close()
-
-    # --- 5. Entropy penalty (raw) ---
-    plt.figure(figsize=(8, 5))
-    plt.plot(steps, H_pen, linewidth=1.6)
-    plt.xlabel("Optimizer step")
-    plt.ylabel("Entropy penalty (avg across GPUs)")
-    plt.title("Entropy penalty (raw)")
-    plt.tight_layout()
-    plt.savefig(H_raw_png, dpi=150)
-    plt.close()
-
-    # --- 6. Entropy penalty (10-step moving average) ---
-    plt.figure(figsize=(8, 5))
-    plt.plot(H_ma_steps, H_ma, linewidth=1.6)
-    plt.xlabel("Optimizer step")
-    plt.ylabel("Entropy penalty (10-step MA)")
-    plt.title("Entropy penalty (10-step moving average)")
-    plt.tight_layout()
-    plt.savefig(H_ma_png, dpi=150)
-    plt.close()
+def save_metrics(metrics_series, out_png_base, out_csv):
+    """
+    Saves a comprehensive CSV and a 4-panel plot of training metrics.
     
-    print(f"Saved training loss plots (raw, ma10) to {os.path.dirname(out_png)}")
+    Args:
+        metrics_series: A list of dictionaries, where each dict is a step's metrics.
+        out_png_base: The base path for saving plots (e.g., "metrics.png").
+        out_csv: The path for saving the full CSV (e.g., "metrics.csv").
+    """
+    if not metrics_series:
+        print("No metrics to save.")
+        return
+
+    # --- 1. Convert to DataFrame and save CSV ---
+    df = pd.DataFrame(metrics_series)
+    df.index.name = "step"
+    df.to_csv(out_csv)
+    print(f"Saved full training metrics to {out_csv}")
+
+    # --- 2. Create the 4-Panel Plot ---
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10), constrained_layout=True)
+    fig.suptitle("Adversarial Optimization Metrics", fontsize=16, fontweight='bold')
+    
+    steps = df.index
+
+    # Panel 1: Reward Progress
+    ax = axes[0, 0]
+    ax.plot(steps, df["soft_reward"], label="Soft Reward (Gumbel)", color="blue", alpha=0.8)
+    ax.plot(steps, df["discrete_reward"], label="Discrete Reward (Hard)", color="red", linestyle="--")
+    ax.set_title("Reward Progress")
+    ax.set_ylabel("Reward Value")
+    ax.set_xlabel("Optimization Step")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Panel 2: Loss Components
+    ax = axes[0, 1]
+    ax.plot(steps, df["nlr_loss"], label="NLR Loss", color="green")
+    ax.plot(steps, df["H_penalty"], label="Entropy Penalty", color="purple")
+    ax.set_title("Loss Components")
+    ax.set_ylabel("Loss Value")
+    ax.set_xlabel("Optimization Step")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Panel 3: Discreteness & Entropy
+    ax = axes[1, 0]
+    ax.plot(steps, df["H_norm"], label="Normalized Entropy (Hn)", color="orange")
+    ax.set_ylabel("Normalized Entropy (0.0 - 1.0)")
+    ax.set_ylim(0, 1.05)
+    
+    ax_twin = ax.twinx()
+    ax_twin.plot(steps, df["avg_max_p"], label="Avg. Max Prob (p_max)", color="magenta")
+    ax_twin.set_ylabel("Avg. Max Probability (0.0 - 1.0)")
+    ax_twin.set_ylim(0, 1.05)
+
+    ax.set_title("Token Discreteness")
+    ax.set_xlabel("Optimization Step")
+    fig.legend(loc='upper center', bbox_to_anchor=(0.7, 0.48), ncol=1)
+    ax.grid(True, alpha=0.3)
+
+    # Panel 4: Optimization Health
+    ax = axes[1, 1]
+    ax.plot(steps, df["grad_norm"], label="Gradient Norm", color="cyan")
+    ax.set_ylabel("Gradient Norm (Log Scale)")
+    ax.set_yscale("log")
+    
+    ax_twin = ax.twinx()
+    ax_twin.plot(steps, df["lambda_t"], label="Entropy Weight (λ)", color="gray", linestyle=":")
+    ax_twin.set_ylabel("Entropy Weight")
+
+    ax.set_title("Optimization Health & Schedule")
+    ax.set_xlabel("Optimization Step")
+    fig.legend(loc='upper center', bbox_to_anchor=(0.3, 0.48), ncol=1)
+    ax.grid(True, alpha=0.3)
+    
+    # Save the combined plot
+    plot_path = f"{os.path.splitext(out_png_base)[0]}_metrics_panel.png"
+    plt.savefig(plot_path, dpi=150)
+    plt.close()
+    print(f"Saved metrics panel plot to {plot_path}")
 
 
 def save_logits(logits_tensor: torch.Tensor, out_path: str):
