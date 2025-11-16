@@ -1,41 +1,41 @@
 """Configuration for continuous adversarial PRM attack."""
 
-# ======================================
-# model + tokenizer
-# ======================================
-
-SKYWORK_MODEL_NAME = "Skywork/Skywork-o1-Open-PRM-Qwen-2.5-1.5B"
-STEP_TOKEN = "\n\n"
+from dataclasses import dataclass
 
 # ======================================
-# experiment control
+# global seed
 # ======================================
 
 RANDOM_SEED = 420
 
-# If True, each epoch uses a single full-batch step per GPU
-# (one optimizer step per epoch, progress bar over epochs).
-# If False, use stochastic mini-batches with per-epoch progress bars.
-FULL_BATCH = True
-
 # ======================================
-# continuous attack hyperparameters
+# hyperparameters
 # ======================================
 
-# prefix parameterization
-NUM_PREFIXES = 30
+@dataclass
+class Hyperparameters:
+    """Dataclass to hold all experiment hyperparameters."""
+    
+    # model and tokenizer
+    SKYWORK_MODEL_NAME: str = "Skywork/Skywork-o1-Open-PRM-Qwen-2.5-1.5B"
+    STEP_TOKEN: str = "\n\n"
 
-# training schedule
-NUM_EPOCHS = 200
-DATA_SUBSET_SIZE = 1
-BATCH_SIZE = 1     # mini-batch size per GPU when FULL_BATCH=False
+    # experiment control
+    # If True, each epoch uses a full-batch.
+    # If False, use stochastic mini-batches.
+    FULL_BATCH: bool = True
 
-# optimizer behavior
-LEARNING_RATE = 0.5
+    NUM_PREFIXES: int = 30
 
-# entropy regularization
-MIN_LAMBDA = 0.001 # start
-MAX_LAMBDA = 0.1   # end
+    # training schedule
+    NUM_EPOCHS: int = 200
+    DATA_SUBSET_SIZE: int = 1
+    BATCH_SIZE: int = 1  # mini-batch size per GPU when FULL_BATCH=False
+    # --- Entropy Regularization ---
+    MIN_LAMBDA: float = 0.001  # start
+    MAX_LAMBDA: float = 0.1   # end
 
-# Gumbel-softmax temperature
-TAU = 0.5
+    LEARNING_RATE: float = 0.5
+
+
+    TAU: float = 0.5

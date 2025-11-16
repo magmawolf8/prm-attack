@@ -21,10 +21,9 @@ from datetime import datetime
 
 # local configuration
 import config as cfg
-  # <-- ADDED
+import artifacts
+
 # third-party imports
-import matplotlib
-import numpy as np
 import torch
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
@@ -34,10 +33,6 @@ from tqdm import tqdm
 # custom model modules
 from skywork_tokenizer import SkyworkTokenizer
 from skywork_o1_prm_inference.model_utils.prm_model import PRM_MODEL
-
-# configure matplotlib before importing pyplot
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 # misc
 import warnings
@@ -114,24 +109,6 @@ class FGSM(torch.optim.SGD):
                 p.add_(p.grad.sign(), alpha=-lr)
 
         return loss
-
-
-# ===============================
-# helper: save hyperparameters
-# ===============================
-
-def save_hyperparams(run_dir: str):
-    hparams = {
-        name: getattr(cfg, name)
-        for name in dir(cfg)
-        if name.isupper() and not name.startswith("_")
-    }
-    hparams["run_dir"] = run_dir
-    hparams["timestamp"] = datetime.now().isoformat(timespec="seconds")
-
-    out_path = os.path.join(run_dir, "hyperparams.json")
-    with open(out_path, "w") as f:
-        json.dump(hparams, f, indent=2, sort_keys=True)
 
 
 # ===============================
@@ -231,120 +208,339 @@ def collate_into_batch(samples_list):
 
 
 # ===============================
-# logging utilities
+# training class
 # ===============================
 
-def save_loss_curve(loss_list, out_png, out_csv):
-    """Save CSV + a small panel of loss curves."""
-    losses = np.array(loss_list, dtype=np.float32)  # shape: [steps, 3]
+class AdversarialTrainer:
+    """Manages the state and execution of the adversarial training loop."""
 
-    # Save CSV with header
-    header = "total_loss,nlr_loss,entropy_penalty"
-    np.savetxt(out_csv, losses, delimiter=",", header=header, comments="")
+    def __init__(self,
+                 gpu_id: int,
+                 num_gpus: int,
+                 dataset: Dataset,
+                 hparams: cfg.Hyperparameters):
+        
+        self.gpu_id = gpu_id
+        self.num_gpus = num_gpus
+        self.data = dataset
+        self.hparams = hparams
+        
+        self.noisy = (gpu_id == 0)
+        
+        # State variables
+        self.run_dir = ""
+        self.sampler = None
+        self.data_loader = None
+        self.skywork_tokenizer = None
+        self.reward_model = None
+        self.token_embedding_layer = None
+        self.vocabulary_size = 0
+        self.adversarial_logits = None
+        self.initial_logits_cpu = None
+        self.optimizer = None
+        self.metrics_series = []
+        self.steps_per_epoch = 0
+        self.total_steps = 0
+        self.global_step = 0
+        self.progress_bar = None
 
-    steps = np.arange(1, len(losses) + 1)
+        # Setup
+        self._setup_output_dir()
+        self._setup_data()
+        self._setup_model_and_opt()
+        self._setup_schedule()
 
-    # Helper: moving average with window 10 (or smaller if fewer points)
-    def moving_average(x, window=10):
-        window = min(window, len(x))
-        if window <= 1:
-            return x, steps  # nothing to smooth
-        weights = np.ones(window, dtype=np.float32) / window
-        ma = np.convolve(x, weights, mode="valid")
-        # Align x-axis: last element of each window
-        ma_steps = np.arange(window, len(x) + 1)
-        return ma, ma_steps
+    def _setup_output_dir(self):
+        """Creates the unique output directory for this run."""
+        if self.noisy:
+            self.run_dir = f"adv_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            os.makedirs(self.run_dir, exist_ok=True)
+            print(f"Outputs will be saved under: {os.path.abspath(self.run_dir)}")
 
-    total = losses[:, 0]
-    nlr = losses[:, 1]
-    H_pen = losses[:, 2]
+    def _setup_data(self):
+        """Initializes the Sampler and DataLoader from the provided Dataset."""
+        self.sampler = DistributedSampler(
+            self.data,
+            num_replicas=self.num_gpus,
+            rank=self.gpu_id,
+            shuffle=True,
+        )
 
-    total_ma, total_ma_steps = moving_average(total, window=10)
-    nlr_ma, nlr_ma_steps = moving_average(nlr, window=10)
-    H_ma, H_ma_steps = moving_average(H_pen, window=10)
+        if self.hparams.FULL_BATCH:
+            local_batch_size = math.ceil(len(self.data) / self.num_gpus)
+        else:
+            local_batch_size = self.hparams.BATCH_SIZE
 
-    base, ext = os.path.splitext(out_png)
-    total_raw_png = base + "_total_raw" + ext
-    total_ma_png = base + "_total_ma10" + ext
-    nlr_raw_png = base + "_nlr_raw" + ext
-    nlr_ma_png = base + "_nlr_ma10" + ext
-    H_raw_png = base + "_Hpenalty_raw" + ext
-    H_ma_png = base + "_Hpenalty_ma10" + ext
+        self.data_loader = DataLoader(
+            self.data,
+            batch_size=local_batch_size,
+            sampler=self.sampler,
+            shuffle=False,
+            num_workers=4,
+            persistent_workers=True,
+            collate_fn=collate_into_batch,
+        )
 
-    # --- 1. Total loss (raw) ---
-    plt.figure(figsize=(8, 5))
-    plt.plot(steps, total, linewidth=1.6)
-    plt.xlabel("Optimizer step")
-    plt.ylabel("Total loss (avg across GPUs)")
-    plt.title("Total attack loss (raw)")
-    plt.tight_layout()
-    plt.savefig(total_raw_png, dpi=150)
-    plt.close()
+        if self.noisy:
+            print("Warming up data loader...")
+            start_time = time.perf_counter()
+            _ = next(iter(self.data_loader))
+            end_time = time.perf_counter()
+            print(f"Data loader warmup took {(end_time - start_time):.1f} seconds")
 
-    # --- 2. Total loss (10-step moving average) ---
-    plt.figure(figsize=(8, 5))
-    plt.plot(total_ma_steps, total_ma, linewidth=1.6)
-    plt.xlabel("Optimizer step")
-    plt.ylabel("Total loss (10-step MA)")
-    plt.title("Total attack loss (10-step moving average)")
-    plt.tight_layout()
-    plt.savefig(total_ma_png, dpi=150)
-    plt.close()
+    def _setup_model_and_opt(self):
+        """Loads the model, tokenizer, and creates optimizer and logits."""
+        self.skywork_tokenizer = SkyworkTokenizer(
+            self.hparams.SKYWORK_MODEL_NAME, self.hparams.STEP_TOKEN
+        )
+        self.reward_model = PRM_MODEL.from_pretrained(
+            self.hparams.SKYWORK_MODEL_NAME
+        ).to(self.gpu_id).eval()
+        
+        self.token_embedding_layer = self.reward_model.pretrained_model.model.embed_tokens.weight
+        self.vocabulary_size = self.token_embedding_layer.shape[0]
 
-    # --- 3. NLR (raw) ---
-    plt.figure(figsize=(8, 5))
-    plt.plot(steps, nlr, linewidth=1.6)
-    plt.xlabel("Optimizer step")
-    plt.ylabel("NLR (avg across GPUs)")
-    plt.title("Negative log reward (raw)")
-    plt.tight_layout()
-    plt.savefig(nlr_raw_png, dpi=150)
-    plt.close()
+        self.adversarial_logits = torch.nn.Parameter(
+            torch.randn(self.hparams.NUM_PREFIXES, self.vocabulary_size, device=self.gpu_id)
+        )
 
-    # --- 4. NLR (10-step moving average) ---
-    plt.figure(figsize=(8, 5))
-    plt.plot(nlr_ma_steps, nlr_ma, linewidth=1.6)
-    plt.xlabel("Optimizer step")
-    plt.ylabel("NLR (10-step MA)")
-    plt.title("Negative log reward (10-step moving average)")
-    plt.tight_layout()
-    plt.savefig(nlr_ma_png, dpi=150)
-    plt.close()
+        if self.noisy:
+            self.initial_logits_cpu = self.adversarial_logits.detach().cpu().clone()
 
-    # --- 5. Entropy penalty (raw) ---
-    plt.figure(figsize=(8, 5))
-    plt.plot(steps, H_pen, linewidth=1.6)
-    plt.xlabel("Optimizer step")
-    plt.ylabel("Entropy penalty (avg across GPUs)")
-    plt.title("Entropy penalty (raw)")
-    plt.tight_layout()
-    plt.savefig(H_raw_png, dpi=150)
-    plt.close()
+        self.optimizer = torch.optim.Adam(
+            [self.adversarial_logits], lr=self.hparams.LEARNING_RATE, maximize=False
+        )
 
-    # --- 6. Entropy penalty (10-step moving average) ---
-    plt.figure(figsize=(8, 5))
-    plt.plot(H_ma_steps, H_ma, linewidth=1.6)
-    plt.xlabel("Optimizer step")
-    plt.ylabel("Entropy penalty (10-step MA)")
-    plt.title("Entropy penalty (10-step moving average)")
-    plt.tight_layout()
-    plt.savefig(H_ma_png, dpi=150)
-    plt.close()
+    def _setup_schedule(self):
+        """Sets up step counts and metric tracking."""
+        if self.hparams.FULL_BATCH:
+            self.steps_per_epoch = 1
+        else:
+            self.steps_per_epoch = math.ceil(
+                len(self.data) / (self.hparams.BATCH_SIZE * self.num_gpus)
+            )
+        
+        self.total_steps = max(1, self.steps_per_epoch * self.hparams.NUM_EPOCHS)
+        self.metrics_series = []
+        self.global_step = 0
+
+    def _get_lambda(self) -> float:
+        """Calculates the entropy regularization weight for the current step."""
+        t = min(1.0, self.global_step / self.total_steps)
+        cos_t = 0.5 * (1 - math.cos(math.pi * t))
+        return (1 - cos_t) * self.hparams.MIN_LAMBDA + cos_t * self.hparams.MAX_LAMBDA
+
+    def run(self):
+        """Runs the main training loop."""
+        if self.noisy:
+            print("Starting training...")
+            if self.hparams.FULL_BATCH:
+                self.progress_bar = tqdm(
+                    total=self.hparams.NUM_EPOCHS,
+                    desc="Full-batch optimization",
+                )
+
+        for epoch in range(self.hparams.NUM_EPOCHS):
+            self._run_epoch(epoch)
+
+        self._cleanup_and_save()
+
+    def _run_epoch(self, epoch: int):
+        """Runs one epoch of training."""
+        if self.noisy and not self.hparams.FULL_BATCH:
+            self.progress_bar = tqdm(
+                total=len(self.data),
+                desc=f"Epoch {epoch + 1}/{self.hparams.NUM_EPOCHS}",
+            )
+        
+        self.sampler.set_epoch(epoch)
+
+        for batch in self.data_loader:
+            self._run_step(batch)
+        
+        if self.noisy:
+            if self.hparams.FULL_BATCH:
+                self.progress_bar.update(1)
+            else:
+                self.progress_bar.close()
+
+    def _run_step(self, batch):
+        """Runs one optimization step."""
+        batch_questions, batch_answers = batch
+
+        # PREPARE DATA
+        tokenized_batch = self.skywork_tokenizer.prepare_steps(
+            batch_questions, batch_answers
+        )
+        batch_embeddings = self.token_embedding_layer[tokenized_batch.data["input_ids"]]
+
+        # MAKE MAGIC TOKENS
+        one_hot = F.gumbel_softmax(
+            self.adversarial_logits, tau=self.hparams.TAU, hard=False, dim=-1
+        )
+        adversarial_prefix = one_hot @ self.token_embedding_layer
+
+        # INSERT MAGIC TOKENS
+        (
+            prefixed_embeddings,
+            prefixed_mask,
+            prefixed_ans_flag,
+            prefixed_reward_flag,
+        ) = insert_adversarial_prefix(
+            tokenized_batch, batch_embeddings, adversarial_prefix
+        )
+        tokenized_batch.data["attention_mask"] = prefixed_mask
+        tokenized_batch.data["answer_flag"] = prefixed_ans_flag
+        tokenized_batch.data["reward_flags"] = prefixed_reward_flag
+        tokenized_batch.pop("input_ids")
+        tokenized_batch = tokenized_batch.to(self.gpu_id)
+
+        # FORWARD PASS
+        model_output = self.reward_model(
+            **tokenized_batch,
+            inputs_embeds=prefixed_embeddings,
+            return_probs=True,
+        )
+
+        # LOSS CALCULATION
+        reward_values = model_output[2][tokenized_batch.data["reward_flags"].bool()]
+        mean_reward = reward_values.mean()
+        nlr_loss = -torch.log(reward_values).mean()
+
+        probs = torch.softmax(self.adversarial_logits, dim=-1)
+        log_probs = (probs + 1e-12).log()
+        entropy_total = -(probs * log_probs).sum()
+
+        H_mean = entropy_total / self.hparams.NUM_PREFIXES
+        H_norm = H_mean / math.log(self.vocabulary_size)
+        
+        lambda_t = self._get_lambda()
+        H_penalty = lambda_t * H_mean
+
+        attack_loss = nlr_loss + H_penalty
+
+        # METRICS FOR LOGGING (pre-backward)
+        with torch.no_grad():
+            max_p_per_prefix = probs.max(dim=-1).values
+            avg_max_p = max_p_per_prefix.mean()
+            H_norm_det = H_norm.detach()
+
+        # BACKPROPAGATION
+        attack_loss.backward()
+
+        # OPTIMIZER STEP (DDP-aware)
+        grad_norm = self._optimizer_step()
+
+        # LOGGING
+        self._log_metrics(
+            attack_loss=attack_loss.detach(),
+            nlr_loss=nlr_loss.detach(),
+            H_penalty=H_penalty.detach(),
+            # Other metrics
+            mean_reward=mean_reward.detach(),
+            H_norm=H_norm_det,
+            avg_max_p=avg_max_p,
+            grad_norm=grad_norm
+        )
+        
+        self.global_step += 1
+
+    def _optimizer_step(self) -> torch.Tensor:
+        """Performs gradient reduction and optimizer step."""
+        dist.all_reduce(self.adversarial_logits.grad, op=dist.ReduceOp.SUM)
+        self.adversarial_logits.grad /= self.num_gpus
+        
+        grad_norm = torch.norm(self.adversarial_logits.grad, dim=-1).mean().detach()
+
+        self.optimizer.step()
+        self.optimizer.zero_grad()
+
+        return grad_norm
+
+    def _log_metrics(self, **kwargs):
+        """Aggregates metrics across GPUs and logs to console/history."""
+        with torch.no_grad():
+            # Collect tensors
+            tensors = [t for t in kwargs.values() if isinstance(t, torch.Tensor)]
+            
+            # Average across GPUs
+            for t in tensors:
+                dist.all_reduce(t, op=dist.ReduceOp.SUM)
+                t /= self.num_gpus
+
+            if self.noisy:
+                # Add to history
+                self.metrics_series.append(
+                    (
+                        float(kwargs['attack_loss'].item()),
+                        float(kwargs['nlr_loss'].item()),
+                        float(kwargs['H_penalty'].item()),
+                    )
+                )
+
+                # Create postfix for tqdm
+                postfix_dict = {
+                    "loss": f"{kwargs['attack_loss'].item():.3f}",
+                    "reward": f"{kwargs['mean_reward'].item():.3f}",
+                    "NLR": f"{kwargs['nlr_loss'].item():.3f}",
+                    "Hn": f"{kwargs['H_norm'].item():.2f}",
+                    "norm": f"{kwargs['grad_norm'].item():.2e}",
+                    "pmax": f"{kwargs['avg_max_p'].item():.2f}",
+                }
+                
+                if self.hparams.FULL_BATCH:
+                    self.progress_bar.set_postfix(postfix_dict)
+                else:
+                    self.progress_bar.update(self.hparams.BATCH_SIZE * self.num_gpus)
+                    self.progress_bar.set_postfix(postfix_dict)
+
+    def _cleanup_and_save(self):
+        """Waits for all processes and saves artifacts on the main process."""
+        dist.barrier()
+        if self.noisy:
+            if self.hparams.FULL_BATCH and self.progress_bar is not None:
+                self.progress_bar.close()
+            
+            self._save_artifacts()
+
+    def _save_artifacts(self):
+        """Saves all run artifacts to the run directory."""
+        print("\n--- Saving artifacts ---")
+        
+        # Save optimized logits
+        opt_path = os.path.join(self.run_dir, "optimized_logits.pt")
+        artifacts.save_logits(self.adversarial_logits.detach().cpu(), opt_path)
+
+        # Save token visualizations
+        probs = torch.softmax(self.adversarial_logits.detach().cpu(), dim=-1)
+        artifacts.save_token_visualizations(probs, self.run_dir)
+
+        # Save config
+        artifacts.save_hyperparams(self.run_dir)
+
+        # Save initial logits for comparison
+        init_path = os.path.join(self.run_dir, "initial_logits.pt")
+        artifacts.save_logits(self.initial_logits_cpu, init_path)
+
+        # Save various training metrics
+        metrics_csv = os.path.join(self.run_dir, "metrics.csv")
+        metrics_png = os.path.join(self.run_dir, "metrics.png")
+        artifacts.save_metrics(self.metrics_series, metrics_png, metrics_csv)
+        print("--- Artifact saving complete ---")
 
 
 # ===============================
-# main training loop
+# main entry point
 # ===============================
 
 def train(gpu_id, num_gpus):
-    # --- OUTPUT DIR ---
-    run_dir = f"adv_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    if gpu_id == 0:
-        os.makedirs(run_dir, exist_ok=True)
-        print(f"Outputs will be saved under: {os.path.abspath(run_dir)}")
-
-    # --- DATA LOADING ---
-    # data = PRM800k("phase2_train.jsonl", cfg.DATA_SUBSET_SIZE)
+    """Initializes the dataset and runs the trainer."""
+    
+    # 1. Initialize hyperparameters from config defaults
+    hparams = cfg.Hyperparameters()
+    
+    # 2. Initialize the dataset
+    # data = PRM800k("phase2_train.jsonl", hparams.DATA_SUBSET_SIZE)
     data = SingleQADataset(
         question="Find the sum of all integer bases $b>9$ for which $17_{b}$ is a divisor of $97_{b}$.",
         answer_steps=[
@@ -356,274 +552,12 @@ def train(gpu_id, num_gpus):
             "Finally, for the total weight:\n- Sum of the weights of all the books: \\[ 8 \\text{ pounds} \\text{ (math and science)} + 4 \\text{ pounds} \\text{ (French)} + 3 \\text{ pounds} \\text{ (English)} + 6 \\text{ pounds} \\text{ (history)} = 21 \\text{ pounds} \\]",
             "Therefore, the total weight of the books Cindy is carrying is \\(\\boxed{21}\\) pounds.",
         ],
-        size=cfg.DATA_SUBSET_SIZE,
+        size=hparams.DATA_SUBSET_SIZE,
     )
-
-    sampler = DistributedSampler(
-        data,
-        num_replicas=num_gpus,
-        rank=gpu_id,
-        shuffle=True,
-    )
-
-    # Choose batch size behavior
-    if cfg.FULL_BATCH:
-        # One batch per epoch per GPU 
-        local_batch_size = math.ceil(len(data) / num_gpus)
-    else:
-        # Standard mini-batches
-        local_batch_size = cfg.BATCH_SIZE
-
-    data_loader = DataLoader(
-        data,
-        batch_size=local_batch_size,
-        sampler=sampler,
-        shuffle=False,
-        num_workers=4,
-        persistent_workers=True,
-        collate_fn=collate_into_batch,
-    )
-
-    if gpu_id == 0:
-        print("Warming up data loader...")
-        start_time = time.perf_counter()
-        _ = next(iter(data_loader))
-        end_time = time.perf_counter()
-        print(f"Data loader warmup took {(end_time - start_time):.1f} seconds")
-
-    # SETUP
-    skywork_tokenizer = SkyworkTokenizer(
-        cfg.SKYWORK_MODEL_NAME, cfg.STEP_TOKEN
-    )
-    reward_model = PRM_MODEL.from_pretrained(cfg.SKYWORK_MODEL_NAME).to(gpu_id).eval()
-    token_embedding_layer = reward_model.pretrained_model.model.embed_tokens.weight
-    vocabulary_size = token_embedding_layer.shape[0]
-
-    adversarial_logits = torch.nn.Parameter(
-        torch.randn(cfg.NUM_PREFIXES, vocabulary_size, device=gpu_id)
-    )
-
-    if gpu_id == 0:
-        initial_logits_cpu = adversarial_logits.detach().cpu().clone()
-
-    optimizer = torch.optim.Adam([adversarial_logits], lr=cfg.LEARNING_RATE, maximize=False)
-    loss_history = []
-
-    if gpu_id == 0:
-        print("Starting training...")
-
-    if cfg.FULL_BATCH:
-        steps_per_epoch = 1
-    else:
-        # approximate global optimizer steps per epoch
-        steps_per_epoch = math.ceil(len(data) / (cfg.BATCH_SIZE * num_gpus))
-
-    total_steps = max(1, steps_per_epoch * cfg.NUM_EPOCHS)
-
-    def get_lambda(step_idx: int) -> float:
-        t = min(1.0, step_idx / total_steps)
-        cos_t = 0.5 * (1 - math.cos(math.pi * t))
-        return (1 - cos_t) * cfg.MIN_LAMBDA + cos_t * cfg.MAX_LAMBDA
-
-    global_step = 0
-
-    # Progress bar setup
-    progress_bar = None
-    if gpu_id == 0 and cfg.FULL_BATCH:
-        progress_bar = tqdm(
-            total=cfg.NUM_EPOCHS,
-            desc="Full-batch optimization",
-        )
-
-    for epoch in range(cfg.NUM_EPOCHS):
-        if gpu_id == 0 and not cfg.FULL_BATCH:
-            progress_bar = tqdm(
-                total=len(data),
-                desc=f"Epoch {epoch + 1}/{cfg.NUM_EPOCHS}",
-            )
-
-        sampler.set_epoch(epoch)
-
-        for batch_questions, batch_answers in data_loader:
-            # PREPARE DATA
-            tokenized_batch = skywork_tokenizer.prepare_steps(
-                batch_questions, batch_answers
-            )
-            batch_embeddings = token_embedding_layer[tokenized_batch.data["input_ids"]]
-
-            # MAKE MAGIC TOKENS
-            one_hot = F.gumbel_softmax(adversarial_logits, tau=cfg.TAU, hard=False, dim=-1)
-            adversarial_prefix = one_hot @ token_embedding_layer
-
-            # INSERT MAGIC TOKENS
-            (
-                prefixed_embeddings,
-                prefixed_mask,
-                prefixed_ans_flag,
-                prefixed_reward_flag,
-            ) = insert_adversarial_prefix(
-                tokenized_batch, batch_embeddings, adversarial_prefix
-            )
-            tokenized_batch.data["attention_mask"] = prefixed_mask
-            tokenized_batch.data["answer_flag"] = prefixed_ans_flag
-            tokenized_batch.data["reward_flags"] = prefixed_reward_flag
-            tokenized_batch.pop("input_ids")  # don't use these anymore
-            tokenized_batch = tokenized_batch.to(gpu_id)
-
-            # FORWARD PASS
-            model_output = reward_model(
-                **tokenized_batch,
-                inputs_embeds=prefixed_embeddings,
-                return_probs=True,
-            )
-
-            # Reward values at reward-flagged positions
-            reward_values = model_output[2][tokenized_batch.data["reward_flags"].bool()]
-            mean_reward = reward_values.mean()
-
-            # negative log reward objective
-            nlr_loss = -torch.log(reward_values).mean()
-
-            # calculate entropy
-            probs = torch.softmax(adversarial_logits, dim=-1)
-            log_probs = (probs + 1e-12).log()
-            entropy_total = -(probs * log_probs).sum()
-
-            H_mean = entropy_total / cfg.NUM_PREFIXES
-            H_norm = H_mean / math.log(vocabulary_size)
-            
-            # entropy objective
-            lambda_t = get_lambda(global_step)
-            H_penalty = lambda_t * H_mean
-
-            attack_loss = nlr_loss + H_penalty
-
-            # --- METRICS FOR LOGGING ---
-            with torch.no_grad():
-                max_p_per_prefix = probs.max(dim=-1).values
-                avg_max_p = max_p_per_prefix.mean()
-
-                H_norm_det = H_norm.detach()
-
-            # BACKPROPAGATION
-            attack_loss.backward()
-
-            # GRADIENT AGGREGATION AND OPTIMIZER STEP
-            dist.all_reduce(adversarial_logits.grad, op=dist.ReduceOp.SUM)
-            adversarial_logits.grad /= num_gpus
-            adversarial_grad = adversarial_logits.grad.clone()
-            optimizer.step()
-            optimizer.zero_grad()
-
-            # LOGGING
-            with torch.no_grad():
-                loss_tensor = attack_loss.detach()
-                nlr_tensor = nlr_loss.detach()
-                H_tensor = H_penalty.detach()
-
-                # Average across GPUs
-                for t in (loss_tensor, nlr_tensor, H_tensor):
-                    dist.all_reduce(t, op=dist.ReduceOp.SUM)
-                    t /= num_gpus
-
-                if gpu_id == 0:
-                    loss_history.append(
-                        (
-                            float(loss_tensor.item()),
-                            float(nlr_tensor.item()),
-                            float(H_tensor.item()),
-                        )
-                    )
-
-                    if cfg.FULL_BATCH:
-                        # one step per epoch; progress bar updated outside
-                        progress_bar.set_postfix(
-                            {
-                                "loss": f"{attack_loss.item():.3f}",
-                                "reward": f"{mean_reward.item():.3f}",
-                                "NLR": f"{nlr_loss.item():.3f}",
-                                "Hn": f"{H_norm_det.item():.2f}",
-                                "norm": f"{torch.norm(adversarial_grad, dim=-1).mean().item():.2e}",
-                                "pmax": f"{avg_max_p.item():.2f}",
-                            }
-                        )
-                    else:
-                        progress_bar.update(cfg.BATCH_SIZE * num_gpus)
-                        progress_bar.set_postfix(
-                            {
-                                "loss": f"{attack_loss.item():.3f}",
-                                "reward": f"{mean_reward.item():.3f}",
-                                "NLR": f"{nlr_loss.item():.3f}",
-                                "Hn": f"{H_norm_det.item():.2f}",
-                                "norm": f"{torch.norm(adversarial_grad, dim=-1).mean().item():.2e}",
-                                "pmax": f"{avg_max_p.item():.2f}",
-                            }
-                        )
-
-            global_step += 1
-
-        if gpu_id == 0:
-            if cfg.FULL_BATCH:
-                progress_bar.update(1)
-            else:
-                progress_bar.close()
-
-    dist.barrier()
-
-    # SAVE AND REPORT
-    if gpu_id == 0:
-        opt_path = os.path.join(run_dir, "optimized_logits.pt")
-        torch.save(adversarial_logits.detach().cpu(), opt_path)
-        print(f"Saved optimized logits to {opt_path}")
-
-        probs = torch.softmax(adversarial_logits.detach().cpu(), dim=-1)
-        num_prefixes, vocab_size = probs.shape
-
-        # Factorize vocabulary size into near-square dimensions
-        side1 = int(np.floor(np.sqrt(vocab_size)))
-        side2 = int(np.ceil(vocab_size / side1))
-        print(f"Vocabulary grid size: {side1} x {side2} ({side1 * side2} >= {vocab_size})")
-
-        vis_dir = os.path.join(run_dir, "token_prob_viz")
-        os.makedirs(vis_dir, exist_ok=True)
-
-        for i in range(num_prefixes):
-            prefix_probs = probs[i]
-
-            # Scale by maximum for visualization (avoid divide-by-zero)
-            max_val = prefix_probs.max()
-            if max_val > 0:
-                prefix_probs = prefix_probs / max_val
-
-            # Pad to fill the grid shape
-            padded = np.zeros(side1 * side2)
-            padded[:vocab_size] = prefix_probs
-            grid = padded.reshape(side1, side2)
-
-            plt.figure(figsize=(6, 6))
-            plt.imshow(grid, cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
-            plt.title(f"Prefix {i:02d} token probabilities (scaled)")
-            plt.axis("off")
-            out_img = os.path.join(vis_dir, f"prefix_{i:02d}_probs_scaled.png")
-            plt.savefig(out_img, dpi=150, bbox_inches="tight")
-            plt.close()
-
-        print(f"Saved scaled token probability visualizations to {vis_dir}")
-
-        save_hyperparams(run_dir)
-
-        init_path = os.path.join(run_dir, "initial_logits.pt")
-        torch.save(initial_logits_cpu, init_path)
-
-        # Save loss CSV + plot
-        loss_csv = os.path.join(run_dir, "training_loss.csv")
-        loss_png = os.path.join(run_dir, "training_loss.png")
-        save_loss_curve(loss_history, loss_png, loss_csv)
-        print(f"Saved training loss CSV to {loss_csv}")
-        print(f"Saved training loss plot to {loss_png}")
-
-        if cfg.FULL_BATCH and progress_bar is not None:
-            progress_bar.close()
+    
+    # 3. Pass all dependencies to the trainer
+    trainer = AdversarialTrainer(data, gpu_id, num_gpus, hparams)
+    trainer.run()
 
 
 def main():
