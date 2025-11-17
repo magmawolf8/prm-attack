@@ -198,7 +198,8 @@ class PrefixOptimizer:
             self.hparams.SKYWORK_MODEL_NAME, self.hparams.STEP_TOKEN
         )
         self.reward_model = PRM_MODEL.from_pretrained(
-            self.hparams.SKYWORK_MODEL_NAME
+            self.hparams.SKYWORK_MODEL_NAME,
+            dtype=torch.bfloat16 if torch.cuda.is_bf16_supported else torch.float16
         ).to(self.gpu_id).eval()
         
         self.token_embedding_layer = self.reward_model.pretrained_model.model.embed_tokens.weight
@@ -325,11 +326,11 @@ class PrefixOptimizer:
             probs = F.one_hot(
                 torch.argmax(self.adversarial_logits, dim=-1),
                 num_classes=self.vocabulary_size
-            ).float()
+            ).type(torch.bfloat16 if torch.cuda.is_bf16_supported else torch.float16)
         else:
             probs = F.gumbel_softmax(
                 self.adversarial_logits, tau=self.hparams.TAU, hard=False, dim=-1
-            )
+            ).type(torch.bfloat16 if torch.cuda.is_bf16_supported else torch.float16)
         return probs @ self.token_embedding_layer
 
     @staticmethod
