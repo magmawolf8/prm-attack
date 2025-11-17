@@ -1,3 +1,5 @@
+.venv
+
 __pycache__/
 
 skywork_o1_prm_inference
