@@ -267,6 +267,9 @@ class PrefixOptimizer:
         )
         batch_embeddings = self.token_embedding_layer[tokenized_batch.data["input_ids"]]
         tokenized_batch.pop("input_ids")
+        batch_attention_mask = tokenized_batch.data["attention_mask"]
+        batch_answer_flags = tokenized_batch.data["answer_flag"]
+        batch_reward_flags = tokenized_batch.data["reward_flags"]
 
         # MAKE MAGIC TOKENS (soft)
         adversarial_prefix = self._make_adversarial_prefix(hard=False)
@@ -278,7 +281,7 @@ class PrefixOptimizer:
             prefixed_ans_flag,
             prefixed_reward_flag,
         ) = self._insert_adversarial_prefix(
-            tokenized_batch, batch_embeddings, adversarial_prefix
+            batch_attention_mask, batch_answer_flags, batch_reward_flags, batch_embeddings, adversarial_prefix
         )
         tokenized_batch.data["inputs_embeds"] = prefixed_embeds
         tokenized_batch.data["attention_mask"] = prefixed_mask
@@ -330,7 +333,7 @@ class PrefixOptimizer:
         return probs @ self.token_embedding_layer
 
     @staticmethod
-    def _insert_adversarial_prefix(tokenized_batch, batch_embeddings, adversarial_prefix):
+    def _insert_adversarial_prefix(batch_attention_mask, batch_answer_flags, batch_reward_flags, batch_embeddings, adversarial_prefix):
         prefix_length = adversarial_prefix.shape[0]
         batch_size = batch_embeddings.shape[0]
         device = batch_embeddings.device
@@ -344,8 +347,8 @@ class PrefixOptimizer:
         for i in range(batch_size):
             sample_embedding = batch_embeddings[i]
 
-            answer_flag_vector = tokenized_batch.data["answer_flag"][i].to(device)
-            reward_flags_vector = tokenized_batch.data["reward_flags"][i].to(device)
+            answer_flag_vector = batch_answer_flags[i].to(device)
+            reward_flags_vector = batch_reward_flags[i].to(device)
 
             start_insertion_idx = torch.nonzero(answer_flag_vector, as_tuple=True)[0][0]
             end_insertion_idx = torch.nonzero(reward_flags_vector, as_tuple=True)[0][-1]
@@ -389,7 +392,7 @@ class PrefixOptimizer:
 
         total_added_length = 2 * prefix_length
         prefixed_attention_mask = F.pad(
-            input=tokenized_batch.data["attention_mask"],
+            input=batch_attention_mask,
             pad=(total_added_length, 0),
             value=1,
         )

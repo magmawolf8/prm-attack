@@ -209,6 +209,9 @@ class NoisyPrefixOptimizer(PrefixOptimizer):
         )
         batch_embeddings = self.token_embedding_layer[tokenized_batch.data["input_ids"]]
         tokenized_batch.pop("input_ids")
+        batch_attention_mask = tokenized_batch.data["attention_mask"]
+        batch_answer_flags = tokenized_batch.data["answer_flag"]
+        batch_reward_flags = tokenized_batch.data["reward_flags"]
 
         # MAKE MAGIC TOKENS
         adversarial_prefix = self._make_adversarial_prefix(hard=False)
@@ -220,7 +223,7 @@ class NoisyPrefixOptimizer(PrefixOptimizer):
             prefixed_ans_flag,
             prefixed_reward_flag,
         ) = NoisyPrefixOptimizer._insert_adversarial_prefix(
-            tokenized_batch, batch_embeddings, adversarial_prefix
+            batch_attention_mask, batch_answer_flags, batch_reward_flags, batch_embeddings, adversarial_prefix
         )
         tokenized_batch.data["inputs_embeds"] = prefixed_embeds
         tokenized_batch.data["attention_mask"] = prefixed_mask
@@ -262,7 +265,7 @@ class NoisyPrefixOptimizer(PrefixOptimizer):
                 hard_ans_flag,
                 hard_reward_flag,
             ) = NoisyPrefixOptimizer._insert_adversarial_prefix(
-                tokenized_batch, batch_embeddings, hard_prefix
+                batch_attention_mask, batch_answer_flags, batch_reward_flags, batch_embeddings, hard_prefix
             )
             tokenized_batch.data["inputs_embeds"] = hard_embeds
             tokenized_batch.data["attention_mask"] = hard_mask
@@ -281,7 +284,7 @@ class NoisyPrefixOptimizer(PrefixOptimizer):
             discrete_reward = discrete_reward_values.mean()
 
             # OTHER METRICS
-            avg_max_p = probs.max(dim=-1).mean()
+            avg_max_p = probs.max(dim=-1).values.mean()
             lambda_t_det = torch.tensor(lambda_t, device=self.gpu_id)
 
         # BACKPROPAGATION
