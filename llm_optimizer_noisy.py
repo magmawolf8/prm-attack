@@ -23,7 +23,7 @@ from datetime import datetime
 import config as cfg
 from utils import SingleQADataset, PRM800k, FGSM, collate_into_batch
 import artifacts
-from prefix_optimizer import PrefixOptimizer
+from prefix_optimizer_noisy import NoisyPrefixOptimizer
 
 # third-party imports
 import torch
@@ -56,7 +56,7 @@ torch.cuda.manual_seed_all(cfg.RANDOM_SEED)
 # training class
 # ===============================
 
-class NoisyPrefixOptimizer(PrefixOptimizer):
+class NoisyLLMOptimizer(NoisyPrefixOptimizer):
     """
     Extends PrefixOptimizer to add logging, artifact saving,
     progress bars, and discrete reward calculation.
